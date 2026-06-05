@@ -1,0 +1,9 @@
+project_id          = "mi-proyecto-gcp"
+region              = "us-central1"
+bucket_name         = "apu-comparativos-bucket-unico"
+warehouse_sheet_url = "https://docs.google.com/spreadsheets/d/1tHcxmpupqf-QHCU53kW0VxZzOsRY8yIb/edit"
+ipc_variation       = "0.0528"
+image_tag           = "latest"
+
+# Ej: permitir que la SA de Cloud Scheduler invoque el servicio.
+# invoker_members = ["serviceAccount:scheduler-sa@mi-proyecto-gcp.iam.gserviceaccount.com"]

@@ -1,0 +1,23 @@
+# --- Core ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pandas==2.2.2
+numpy==1.26.4
+PyYAML==6.0.2
+
+# --- Google Cloud ---
+google-cloud-storage==2.18.2
+google-auth==2.34.0
+gspread==6.1.2
+
+# --- Parsing ---
+openpyxl==3.1.5
+pdfplumber==0.11.4
+
+# --- NLP / matching ---
+thefuzz==0.22.1
+python-Levenshtein==0.25.1
+
+# --- Embeddings (OPCIONAL: solo si USE_EMBEDDINGS=true) ---
+# Pesa varios cientos de MB (torch). Descomentar y reconstruir imagen para usarlo.
+# sentence-transformers==3.0.1

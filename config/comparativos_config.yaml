@@ -1,0 +1,87 @@
+# Configuración por archivo comparativo.
+#
+# El loader auto-detecta la fila de encabezado y las columnas, pero aquí puedes
+# declarar metadatos y overrides cuando un archivo tenga un layout difícil.
+#
+# Campos por entrada:
+#   match:        patrón (substring, case-insensitive) del nombre del archivo en GCS.
+#   region:       región a la que pertenecen los precios (clave del análisis regional).
+#   format:       'materiales_pdf' | 'servicios_pdf' | 'proveedores_xlsx' | 'macro_xlsx' | 'auto'
+#   sheet:        (opcional, xlsx) nombre exacto o índice de hoja; si se omite procesa todas.
+#   header_keywords: palabras que deben aparecer en la fila de encabezado para detectarla.
+#   desc_aliases: posibles nombres de la columna de descripción.
+#   unit_aliases: posibles nombres de la columna de unidad.
+#   price_aliases: posibles nombres de columnas de precio (cada proveedor = una columna).
+#   best_price_alias: (opcional) columna ya consolidada de "mejor precio".
+
+defaults:
+  header_keywords: ["descripcion", "item", "articulo", "ítem", "artículo"]
+  desc_aliases: ["descripcion del item", "descripcion del ítem", "descripcion", "descripción", "articulo", "artículo", "item", "ítem"]
+  unit_aliases: ["und", "unidad", "un", "medida"]
+  price_aliases: ["v/unitario", "vr unitario", "vr. unitario", "valor unitario", "vlr. unitario", "precio", "antes de iva", "mejor precio"]
+  exclude_aliases: ["cant", "cantidad", "cant. real", "consumo", "iva", "v/total", "vr total", "vlr. total", "total", "nro", "n°", "item", "ítem", "fecha", "%"]
+  best_price_alias: "mejor precio"
+
+files:
+  # --- PDFs de materiales (precio por ciudad, traen MEJOR PRECIO) ---
+  - match: "Barranquilla_V_02"
+    region: "Barranquilla"
+    format: "materiales_pdf"
+    best_price_alias: "mejor precio"
+  - match: "CARTAGENA_V_02"
+    region: "Cartagena"
+    format: "materiales_pdf"
+    best_price_alias: "mejor precio"
+  - match: "MONTERÍA_V_02"
+    region: "Montería"
+    format: "materiales_pdf"
+    best_price_alias: "mejor precio"
+  - match: "SANTA_MARTA_V_02"
+    region: "Santa Marta"
+    format: "materiales_pdf"
+    best_price_alias: "mejor precio"
+
+  # --- PDFs de servicios / mano de obra (precio por proveedor) ---
+  - match: "Servicios_Barranquilla"
+    region: "Barranquilla"
+    format: "servicios_pdf"
+  - match: "Servicios_Cartagena"
+    region: "Cartagena"
+    format: "servicios_pdf"
+  - match: "Servicios_Montería"
+    region: "Montería"
+    format: "servicios_pdf"
+  - match: "Servicios_Santa_Marta"
+    region: "Santa Marta"
+    format: "servicios_pdf"
+
+  # --- Excel de proveedores (Medellín y otros) ---
+  - match: "FERRETERIAS_Estructurar_Medellin"
+    region: "Medellín"
+    format: "proveedores_xlsx"
+  - match: "TOXEMENT_Estructurar_Medellin"
+    region: "Medellín"
+    format: "proveedores_xlsx"
+  - match: "pintura_2026_Estructurar_Medellin"
+    region: "Medellín"
+    format: "proveedores_xlsx"
+  - match: "mano_de_obra_Estructurar_Medellin"
+    region: "Medellín"
+    format: "proveedores_xlsx"
+  - match: "Alfa_Sait_Santander_y_Cesar"
+    region: "Santander/Cesar"
+    format: "proveedores_xlsx"
+  - match: "TUBERIA_2026_Ingant_Oriente_Ant"
+    region: "Oriente Antioqueño"
+    format: "proveedores_xlsx"
+  - match: "Plomeria_Ingant_Oriente_Ant"
+    region: "Oriente Antioqueño"
+    format: "proveedores_xlsx"
+
+  # --- Acuerdos macro de precios ---
+  - match: "MABC_Manizales"
+    region: "Manizales"
+    format: "macro_xlsx"
+  - match: "MABC_Valle"
+    region: "Valle"
+    format: "macro_xlsx"
