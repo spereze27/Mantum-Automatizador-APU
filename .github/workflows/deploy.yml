@@ -1,0 +1,68 @@
+name: Build & Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  SERVICE_NAME: apu-comparativo-mtto
+  ARTIFACT_REPO: apu-images
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # necesario si se migra a Workload Identity Federation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Autenticación a GCP usando la clave JSON de la SA de despliegue ---
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      # --- Build & Push de la imagen ---
+      - name: Build and Push image
+        run: |
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${ARTIFACT_REPO}/${SERVICE_NAME}:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      # --- Deploy a Cloud Run ---
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${SERVICE_NAME}" \
+            --image "${IMAGE}" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --service-account "apu-comparativo-sa@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com" \
+            --memory 2Gi --cpu 2 --timeout 900 \
+            --max-instances 2 --min-instances 0 \
+            --no-allow-unauthenticated \
+            --set-env-vars "GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" \
+            --set-env-vars "GCP_REGION=${{ secrets.GCP_REGION }}" \
+            --set-env-vars "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" \
+            --set-env-vars "GCS_INPUT_PREFIX=comparativos/" \
+            --set-env-vars "GCS_OUTPUT_PREFIX=reportes/" \
+            --set-env-vars "WAREHOUSE_SHEET_URL=${{ secrets.WAREHOUSE_SHEET_URL }}" \
+            --set-env-vars "WAREHOUSE_TAB=BD APU MTTO" \
+            --set-env-vars "WAREHOUSE_HEADER_ROW=2" \
+            --set-env-vars "IPC_VARIATION=${{ secrets.IPC_VARIATION }}" \
+            --set-env-vars "APPLY_IPC_TO_WAREHOUSE=true" \
+            --set-env-vars "APPLY_IPC_TO_COMPARATIVOS=false" \
+            --set-env-vars "FUZZY_THRESHOLD=82" \
+            --set-env-vars "USE_EMBEDDINGS=false" \
+            --set-env-vars "DRY_RUN=false"
