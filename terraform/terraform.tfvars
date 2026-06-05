@@ -1,0 +1,7 @@
+project_id          = "project-452fd151-b35e-42c3-9e8"
+region              = "us-central1"
+bucket_name         = "mantum-apu-comparativos-452fd151"
+warehouse_sheet_url = "https://docs.google.com/spreadsheets/d/1tHcxmpupqf-QHCU53kW0VxZzOsRY8yIb/edit"
+ipc_variation       = "0.0528"
+image_tag           = "latest"
+github_repo   = "spereze27/Mantum-Automatizador-APU"

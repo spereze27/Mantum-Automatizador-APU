@@ -4,14 +4,13 @@ output "service_account_email" {
 }
 
 output "deployer_sa_email" {
-  description = "Correo de la SA de despliegue (CI/CD)."
+  description = "Correo de la SA de despliegue (CI/CD). Va en el secret DEPLOYER_SA_EMAIL."
   value       = google_service_account.deployer_sa.email
 }
 
-output "deployer_sa_key_base64" {
-  description = "Clave JSON (base64) de la SA de despliegue para el secret GCP_SA_KEY."
-  value       = google_service_account_key.deployer_key.private_key
-  sensitive   = true
+output "wif_provider" {
+  description = "Recurso del proveedor WIF. Va en el secret WIF_PROVIDER del workflow."
+  value       = google_iam_workload_identity_pool_provider.github.name
 }
 
 output "bucket_name" {
@@ -20,8 +19,4 @@ output "bucket_name" {
 
 output "artifact_registry_repo" {
   value = "${var.region}-docker.pkg.dev/${var.project_id}/${var.artifact_repo}"
-}
-
-output "cloud_run_url" {
-  value = google_cloud_run_v2_service.apu.uri
 }

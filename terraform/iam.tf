@@ -53,9 +53,36 @@ resource "google_service_account_iam_member" "deployer_actas_runtime" {
 }
 
 # ==========================================================================
-# Clave de la SA de despliegue (para GitHub Secret GCP_SA_KEY)
-# Alternativa recomendada: Workload Identity Federation (sin clave).
+# Workload Identity Federation (WIF) para GitHub Actions — SIN claves JSON.
+# La org policy bloquea claves de SA, así que GitHub se autentica vía OIDC.
 # ==========================================================================
-resource "google_service_account_key" "deployer_key" {
+resource "google_iam_workload_identity_pool" "github" {
+  workload_identity_pool_id = "github-pool"
+  display_name              = "GitHub Actions Pool"
+  description               = "Pool para autenticar GitHub Actions vía OIDC"
+}
+
+resource "google_iam_workload_identity_pool_provider" "github" {
+  workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
+  workload_identity_pool_provider_id = "github-provider"
+  display_name                       = "GitHub OIDC"
+
+  attribute_mapping = {
+    "google.subject"       = "assertion.sub"
+    "attribute.repository" = "assertion.repository"
+  }
+
+  # Solo el repo indicado puede usar este provider.
+  attribute_condition = "assertion.repository == \"${var.github_repo}\""
+
+  oidc {
+    issuer_uri = "https://token.actions.githubusercontent.com"
+  }
+}
+
+# Permite que el repo de GitHub impersone la SA de despliegue.
+resource "google_service_account_iam_member" "wif_deployer" {
   service_account_id = google_service_account.deployer_sa.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repo}"
 }
