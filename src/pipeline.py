@@ -167,7 +167,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
 
     # Unifica ambas fuentes en un solo catálogo tidy (mismo esquema).
     base_cols = ["region", "proveedor", "descripcion", "unidad", "precio",
-                 "archivo", "formato", "fuente_tipo", "gcs_path"]
+                 "archivo", "formato", "fuente_tipo", "gcs_path", "columna_precio"]
     parts = []
     for d in (comparativos, consolidado):
         if d is not None and not d.empty:
@@ -272,7 +272,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         matched = cand_norm is not None
         # --- Agregación separada por fuente (se usa PROMEDIO) ---
         precio_comp_prom = precio_comp_min = precio_comp_med = n_comp = None
-        region_comp = prov_comp = link_comp = arch_comp = None
+        region_comp = prov_comp = link_comp = arch_comp = col_comp = None
         precio_cons_prom = precio_cons_med = precio_cons_min = precio_cons_max = n_cons = None
         link_cons = arch_cons = None
 
@@ -291,6 +291,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 region_comp = brow["region"]
                 prov_comp = brow.get("proveedor", "")
                 arch_comp = brow.get("archivo", "")
+                col_comp = brow.get("columna_precio", "")
                 link_comp = _gcs_link(brow.get("gcs_path", ""))
 
             if not con.empty:
@@ -318,6 +319,9 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         #   ambos      -> w·promedio_consolidado + (1-w)·promedio_comparativo
         #   solo uno   -> el promedio de esa fuente
         w = settings.consolidado_weight
+        def _cop(x):
+            try: return "$" + f"{float(x):,.0f}".replace(",", ".")
+            except Exception: return str(x)
         if precio_cons_prom is not None and precio_comp_prom is not None:
             precio_ref = round(w * precio_cons_prom + (1 - w) * precio_comp_prom, 2)
             tipo_ref = f"Promedio ponderado (Consolidado {int(w*100)}% / Cotización {int((1-w)*100)}%)"
@@ -325,6 +329,10 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             link_ref = link_cons
             region_ref = "Varias fuentes"
             prov_ref = prov_comp
+            de_donde = (
+                f"Consolidado (gasto real, {n_cons} facturas, prom {_cop(precio_cons_prom)}) {int(w*100)}% "
+                f"+ cotización '{arch_comp}' [{region_comp}, col '{col_comp}', prom {_cop(precio_comp_prom)}] {int((1-w)*100)}%"
+            )
         elif precio_cons_prom is not None:
             precio_ref = precio_cons_prom
             tipo_ref = "Gasto real (Consolidado) - promedio"
@@ -332,6 +340,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             link_ref = link_cons
             region_ref = "Varias plantas"
             prov_ref = ""
+            de_donde = f"Consolidado (gasto real): promedio de {n_cons} facturas en {con['region'].nunique() if not con.empty else 0} planta(s)"
         elif precio_comp_prom is not None:
             precio_ref = precio_comp_prom
             tipo_ref = "Cotización proveedor - promedio"
@@ -339,9 +348,11 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             link_ref = link_comp
             region_ref = region_comp
             prov_ref = prov_comp
+            de_donde = f"Cotización '{arch_comp}' [{region_comp}], columna '{col_comp}', promedio de {n_comp} cotización(es)"
         else:
             precio_ref = None
             fuente_ref = tipo_ref = link_ref = region_ref = prov_ref = None
+            de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
         diferencia_vs_ipc = pct_diferencia = por_encima_ipc = None
         if precio_ref is not None and valor_wh_ipc:
@@ -387,6 +398,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             # Referencia (promedio ponderado) / refutación
             "precio_referencia": precio_ref,
             "como_se_calculo": tipo_ref,
+            "de_donde_salio_el_precio": de_donde,
             "fuente_que_refuta": fuente_ref,
             "enlace_fuente": link_ref,
             "diferencia_vs_ipc": diferencia_vs_ipc,

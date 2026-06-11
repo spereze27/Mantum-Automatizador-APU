@@ -158,48 +158,151 @@ def _find_col(cols_norm: list, aliases: list) -> Optional[int]:
 # Parsers por formato
 # ---------------------------------------------------------------------------
 
+MAX_PRICE_COP = 100_000_000  # tope de cordura: descarta teléfonos/NITs/garbage.
+
+_PROV_NOISE = [
+    "telefono", "direccion", "nit", "vunitario", "vrunitariototal", "valorunitario",
+    "vunitario", "unitario", "total", "antesdeiva", "iva", "credito", "dias",
+    "medida", "cantidad", "vtotal", "nan", "mejor", "precio", "costo", "directo", "vr",
+]
+
+
+def _clean_provider(label: str) -> str:
+    """Limpia la etiqueta de la columna de precio para dejar el nombre del
+    proveedor (quita 'telefono', cifras sueltas, 'v/unitario', etc.)."""
+    toks = re.split(r"[\s/]+", str(label).strip())
+    keep = []
+    for t in toks:
+        tn = _norm_header(t)
+        if not tn or tn.isdigit() or any(n in tn for n in _PROV_NOISE):
+            continue
+        keep.append(t)
+    return " ".join(keep).strip() or "Cotización"
+
+
 def _tidy_rows(records: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame.from_records(records)
     if df.empty:
         return df
     df = df[df["descripcion"].astype(str).str.strip().ne("")]
     df = df[df["precio"].notna()]
+    df = df[df["precio"] <= MAX_PRICE_COP]  # quita teléfonos/NITs/totales absurdos
     return df.reset_index(drop=True)
 
 
+def _combine_header(raw: pd.DataFrame, hr: int) -> tuple[list, int]:
+    """Combina encabezados repartidos en varias filas (ej. 'VR UNITARIO' arriba
+    y 'TOTAL' abajo) en un solo encabezado por columna. Devuelve (header, fila_datos)."""
+    headers = [_norm_header(c) for c in raw.iloc[hr].tolist()]
+    ncols = len(headers)
+    data_start = hr + 1
+    for k in range(hr + 1, min(hr + 4, len(raw))):
+        rowvals = raw.iloc[k].tolist()
+        numeric = sum(1 for v in rowvals if to_number(v) is not None)
+        nonempty = sum(1 for v in rowvals if pd.notna(v) and str(v).strip() != "")
+        # Fila de continuación de encabezado: tiene texto pero casi nada numérico.
+        if nonempty > 0 and numeric <= max(1, int(nonempty * 0.3)):
+            for i, v in enumerate(rowvals):
+                if i < ncols and pd.notna(v) and str(v).strip() != "":
+                    add = _norm_header(v)
+                    if add and add not in headers[i]:
+                        headers[i] = (headers[i] + " " + add).strip()
+            data_start = k + 1
+        else:
+            data_start = k
+            break
+    return headers, data_start
+
+
+# Columnas que NUNCA son el precio unitario final (se excluyen siempre).
+_HARD_EXCLUDE = [
+    "iva", "costodirecto", "costo directo", "subtotal", "antesdeiva", "antes de iva",
+    "descuento", "dscto", "cant", "cantidad", "consumo", "desperdicio",
+    "vlrtotal", "vlr total", "valortotal", "valor total", "vrtotal", "vr total",
+    "fecha", "nro", "telefono", "direccion", "nit",
+]
+
+
+def _select_price_cols(header: list, rule: "FileRule") -> list:
+    """Selecciona columna(s) de precio unitario CON IVA, evitando IVA/%/costo directo/totales de fila.
+    Prioridad: 0) best_price_alias del config (override exacto)  1) 'unitario total'
+    2) 'vr/valor unitario'  3) 'TOTAL' (patrón antes de iva/iva/total)  4) alias del config."""
+    norm = [c.replace(" ", "") for c in header]
+
+    def is_iva_or_pct(cc):  # el IVA o cualquier columna de porcentaje NUNCA es el precio
+        return "iva" in cc or "%" in cc or "porcentaje" in cc
+
+    def is_unitario(cc):
+        return "unitario" in cc and not is_iva_or_pct(cc)
+
+    def is_rowtotal(cc):  # total de fila (unit x cantidad), no es precio unitario
+        return any(t in cc for t in ["vtotal", "vlrtotal", "valortotal", "vrtotal", "subtotal"])
+
+    def hard_excluded(cc):
+        if is_iva_or_pct(cc):
+            return True
+        if "unitario" in cc:           # un 'unitario' no se excluye por colisión
+            return False
+        return any(_norm_header(a).replace(" ", "") in cc for a in _HARD_EXCLUDE)
+
+    # 0) Override explícito del config: el alias de "mejor precio"/columna final.
+    #    Máxima prioridad y verificable por archivo.
+    if rule.best_price_alias:
+        bpa = _norm_header(rule.best_price_alias).replace(" ", "")
+        ov = [i for i, cc in enumerate(norm) if bpa and bpa in cc and not is_iva_or_pct(cc)]
+        if ov:
+            return ov
+    # 1) Precio unitario total (con IVA): máxima prioridad heurística.
+    ut = [i for i, cc in enumerate(norm) if "unitario" in cc and "total" in cc and not is_iva_or_pct(cc)]
+    if ut:
+        return ut
+    # 2) Vr/Valor unitario por proveedor.
+    vu = [i for i, cc in enumerate(norm) if is_unitario(cc)]
+    if vu:
+        return vu
+    # 3) Patrón "ANTES DE IVA / IVA / TOTAL": el precio con IVA es la columna TOTAL.
+    hay_iva = any("iva" in cc for cc in norm)
+    if hay_iva:
+        tot = [i for i, cc in enumerate(norm)
+               if "total" in cc and not is_rowtotal(cc) and not is_iva_or_pct(cc) and "unitario" not in cc]
+        if tot:
+            return tot
+    # 4) Alias del config, excluyendo lo prohibido y los totales de fila.
+    pa = [i for i, cc in enumerate(norm)
+          if any(_norm_header(a).replace(" ", "") in cc for a in (rule.price_aliases or []))
+          and not hard_excluded(cc) and not is_rowtotal(cc)]
+    return pa
+
+
 def _parse_generic_table(raw: pd.DataFrame, rule: FileRule, filename: str) -> pd.DataFrame:
-    """Parser tabular genérico: detecta encabezado, columna desc/unidad y todas
-    las columnas de precio (cada una es un proveedor)."""
+    """Parser tabular genérico: detecta encabezado (incluso multi-fila), columna
+    desc/unidad y la columna de precio unitario correcta (con IVA, no el IVA)."""
     hr = _detect_header_row(raw, rule.header_keywords)
     if hr is None:
         return pd.DataFrame()
-    header = [_norm_header(c) for c in raw.iloc[hr].tolist()]
-    body = raw.iloc[hr + 1 :].reset_index(drop=True)
+    header, data_start = _combine_header(raw, hr)
+    body = raw.iloc[data_start:].reset_index(drop=True)
 
     desc_i = _find_col(header, rule.desc_aliases)
     unit_i = _find_col(header, rule.unit_aliases)
     if desc_i is None:
         return pd.DataFrame()
 
-    excl = [_norm_header(a) for a in (rule.exclude_aliases or [])]
-
-    def _is_excluded(col_name: str) -> bool:
-        return any(a and a in col_name for a in excl)
-
-    # Columnas de precio: las que matchean price_aliases o están a la derecha de
-    # la unidad y contienen valores numéricos. Se descartan columnas de
-    # cantidad/total/IVA por nombre de encabezado.
-    price_cols: list[int] = []
-    for idx, c in enumerate(header):
-        if idx in (desc_i, unit_i) or _is_excluded(c):
-            continue
-        if any(_norm_header(a) in c for a in rule.price_aliases):
-            price_cols.append(idx)
+    price_cols = _select_price_cols(header, rule)
+    if price_cols:
+        cols_elegidas = [header[i] if i < len(header) else f"col{i}" for i in price_cols]
+        print(f"[precio] {filename}: columna(s) de precio = {cols_elegidas}")
     if not price_cols:
-        # fallback: columnas numéricas a la derecha de la descripción, excluyendo
-        # las de cantidad/total/IVA por nombre.
+        # Último recurso: columnas numéricas a la derecha de la descripción,
+        # excluyendo por nombre cantidad/total/IVA/costo directo.
+        excl = [_norm_header(a) for a in (rule.exclude_aliases or [])] + \
+               [_norm_header(a) for a in _HARD_EXCLUDE]
         for idx in range(desc_i + 1, raw.shape[1]):
-            if idx < len(header) and _is_excluded(header[idx]):
+            cname = header[idx] if idx < len(header) else ""
+            cc = cname.replace(" ", "")
+            if "unitario" in cc and "total" in cc:
+                pass  # nunca excluir el unitario total
+            elif any(a and a.replace(" ", "") in cc for a in excl):
                 continue
             col_vals = body.iloc[:, idx].map(to_number)
             if col_vals.notna().sum() >= max(3, len(body) * 0.2):
@@ -217,16 +320,17 @@ def _parse_generic_table(raw: pd.DataFrame, rule: FileRule, filename: str) -> pd
             price = to_number(row.iloc[pc])
             if price is None:
                 continue
-            proveedor = header[pc] if pc < len(header) else f"col{pc}"
+            col_label = header[pc] if pc < len(header) else f"col{pc}"
             records.append(
                 {
                     "region": rule.region,
-                    "proveedor": proveedor,
+                    "proveedor": col_label,
                     "descripcion": str(desc).strip(),
                     "unidad": str(unit).strip() if unit is not None else "",
                     "precio": price,
                     "archivo": filename,
                     "formato": rule.format,
+                    "columna_precio": col_label,
                 }
             )
     return _tidy_rows(records)

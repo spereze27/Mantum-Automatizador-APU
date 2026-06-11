@@ -15,8 +15,8 @@
 #   best_price_alias: (opcional) columna ya consolidada de "mejor precio".
 
 defaults:
-  header_keywords: ["descripcion", "item", "articulo", "ítem", "artículo"]
-  desc_aliases: ["descripcion del item", "descripcion del ítem", "descripcion", "descripción", "articulo", "artículo", "item", "ítem"]
+  header_keywords: ["descripcion", "item", "articulo", "ítem", "artículo", "material", "insumo"]
+  desc_aliases: ["descripcion del item", "descripcion del ítem", "descripcion", "descripción", "articulo", "artículo", "item", "ítem", "material", "insumo"]
   unit_aliases: ["und", "unidad", "un", "medida"]
   price_aliases: ["v/unitario", "vr unitario", "vr. unitario", "valor unitario", "vlr. unitario", "precio", "antes de iva", "mejor precio"]
   exclude_aliases: ["cant", "cantidad", "cant. real", "consumo", "iva", "v/total", "vr total", "vlr. total", "total", "nro", "n°", "item", "ítem", "fecha", "%"]
@@ -59,33 +59,59 @@ files:
   - match: "FERRETERIAS_Estructurar_Medellin"
     region: "Medellín"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
   - match: "TOXEMENT_Estructurar_Medellin"
     region: "Medellín"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
   - match: "pintura_2026_Estructurar_Medellin"
     region: "Medellín"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
   - match: "mano_de_obra_Estructurar_Medellin"
     region: "Medellín"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
   - match: "Alfa_Sait_Santander_y_Cesar"
     region: "Santander/Cesar"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
   - match: "TUBERIA_2026_Ingant_Oriente_Ant"
     region: "Oriente Antioqueño"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
   - match: "Plomeria_Ingant_Oriente_Ant"
     region: "Oriente Antioqueño"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
   - match: "Amoblamiento_Ingant_Oriente_Ant"
     region: "Oriente Antioqueño"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
   - match: "EPP_Ingant_Oriente_Ant"
     region: "Oriente Antioqueño"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
   - match: "Ferreteria_Ingant_Oriente_Ant"
     region: "Oriente Antioqueño"
     format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
+  - match: "Liviano_2026_Ingant"
+    region: "Oriente Antioqueño"
+    format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
+  - match: "MANO_DE_OBRA_2026_Ingant"
+    region: "Oriente Antioqueño"
+    format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
+  - match: "Pintura_Ingant_Oriente_Ant"
+    region: "Oriente Antioqueño"
+    format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
+  - match: "Lista_Precios_1_Febrero_2026_Estructurar_Medellin"
+    region: "Medellín"
+    format: "proveedores_xlsx"
+    best_price_alias: "vr unitario total"
 
   # --- Acuerdos macro de precios ---
   - match: "MABC_Manizales"

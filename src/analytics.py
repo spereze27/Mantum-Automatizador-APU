@@ -26,7 +26,8 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
         "region_mejor_comparativo", "proveedor_comparativo",
         "precio_consolidado_promedio", "precio_consolidado_mediana",
         "precio_consolidado_min", "precio_consolidado_max", "n_facturas_consolidado",
-        "precio_referencia", "como_se_calculo", "fuente_que_refuta", "enlace_fuente",
+        "precio_referencia", "como_se_calculo", "de_donde_salio_el_precio",
+        "fuente_que_refuta", "enlace_fuente",
         "diferencia_vs_ipc", "pct_diferencia", "warehouse_por_debajo_del_mercado",
         "nuevo_valor", "actualizado",
     ]
