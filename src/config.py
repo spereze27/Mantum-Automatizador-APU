@@ -54,7 +54,7 @@ class Settings:
     wh_col_codigo: str = field(default_factory=lambda: os.getenv("WH_COL_CODIGO", "Código"))
     wh_col_desc: str = field(default_factory=lambda: os.getenv("WH_COL_DESC", "Nombre"))
     wh_col_und: str = field(default_factory=lambda: os.getenv("WH_COL_UND", "Und"))
-    wh_col_precio: str = field(default_factory=lambda: os.getenv("WH_COL_PRECIO", "Vr Unitario"))
+    wh_col_precio: str = field(default_factory=lambda: os.getenv("WH_COL_PRECIO", "Precio de Lista"))
     wh_col_grupo: str = field(default_factory=lambda: os.getenv("WH_COL_GRUPO", "Grupo"))
 
     # --- Credenciales ---

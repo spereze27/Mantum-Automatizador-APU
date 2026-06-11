@@ -35,6 +35,43 @@ COL_GRUPO = "Grupo"
 MATCHABLE_GROUPS = {"material", "mano de obra", "transporte", "equipo"}
 
 # Segmentación del análisis en tres categorías de costo.
+import re as _re
+
+def _cop(x) -> str:
+    try:
+        return "$" + f"{float(x):,.0f}".replace(",", ".")
+    except Exception:
+        return str(x)
+
+_STRONG_UNITS = {"m3", "m2", "m", "kg", "gl", "lb", "in", "l", "ml_u"}
+
+def _unit_canon(s) -> str:
+    """Unidad canónica a partir de una celda de unidad. Solo unidades de medida
+    'fuertes' se usan para filtrar (und/global se consideran ambiguas)."""
+    u = str(s or "").strip().lower()
+    u = u.replace("³", "3").replace("²", "2").replace('"', "in")
+    u = _re.sub(r"[^a-z0-9]", "", u)
+    if u in ("m3", "mt3", "mts3"): return "m3"
+    if u in ("m2", "mt2", "mts2"): return "m2"
+    if u in ("m", "ml", "mt", "mts", "metro", "metros"): return "m"
+    if u in ("kg", "kgs", "kilo", "kilos"): return "kg"
+    if u in ("gl", "gal", "galon", "galones"): return "gl"
+    if u in ("lb", "lbs", "libra", "libras"): return "lb"
+    if u in ("in", "pulg", "pulgada", "pulgadas"): return "in"
+    if u in ("l", "lt", "lts", "litro", "litros"): return "l"
+    return ""  # und, global, lona, etc. -> ambiguo
+
+def _detect_unit_in_text(text: str) -> str:
+    """Detecta una unidad de medida fuerte dentro de una descripción (p.ej.
+    'ARENA ... POR M3' -> m3)."""
+    t = " " + _re.sub(r"[^a-z0-9 ]", " ", str(text or "").lower()) + " "
+    for tok, canon in [(" m3 ", "m3"), (" m2 ", "m2"), (" kg ", "kg"),
+                       (" gl ", "gl"), (" galon ", "gl"), (" lb ", "lb"),
+                       (" ml ", "m"), (" mts ", "m"), (" m ", "m")]:
+        if tok in t:
+            return canon
+    return ""
+
 def _categoria(grupo) -> str:
     g = str(grupo).strip().lower()
     if g in ("material", "equipo"):
@@ -279,28 +316,61 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             for v in matcher.match_many(desc, und, limit=15):
                 match_norms.add(v["norm"])
         # --- Agregación separada por fuente (se usa PROMEDIO) ---
-        precio_comp_prom = precio_comp_min = precio_comp_med = n_comp = None
+        precio_comp_prom = precio_comp_min = precio_comp_med = precio_comp_max = n_comp = None
         region_comp = prov_comp = link_comp = arch_comp = col_comp = None
+        region_comp_max = prov_comp_max = None
         precio_cons_prom = precio_cons_med = precio_cons_min = precio_cons_max = n_cons = None
         link_cons = arch_cons = None
+        todas_las_fuentes = None
 
         if matched and not comp.empty:
-            grp = comp[comp["item_norm"].isin(match_norms)]
+            grp = comp[comp["item_norm"].isin(match_norms)].copy()
+
+            # (1) Filtro por unidad: si el insumo tiene una unidad de medida fuerte
+            # (m3/m2/m/kg/gl/lb/in/l) y existen variantes con esa misma unidad,
+            # se restringe a ellas (evita comparar 'arena por m3' contra 'lona').
+            wh_u = _unit_canon(und)
+            if wh_u in _STRONG_UNITS and not grp.empty:
+                def _ru(r):
+                    return _unit_canon(r.get("unidad")) or _detect_unit_in_text(r.get("descripcion"))
+                grp["_u"] = grp.apply(_ru, axis=1)
+                same = grp[grp["_u"] == wh_u]
+                if not same.empty:
+                    grp = same
+
+            # (4) Recorte de inflados: descarta precios desproporcionados dentro
+            # del propio ítem (p.ej. una 'Lija' a 11.000 cuando casi todas ~2.000).
+            if len(grp) >= 4:
+                med = float(grp["precio"].median())
+                if med > 0:
+                    grp = grp[(grp["precio"] >= med / 4) & (grp["precio"] <= med * 4)]
+
             cot = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"]
             con = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"]
 
+            # (3) Todas las fuentes con info de este ítem (archivo|región|prov|precio).
+            fuentes = []
+            for _, fr in grp.sort_values("precio").head(20).iterrows():
+                fuentes.append(
+                    f"{fr.get('archivo','')} [{fr.get('region','')}"
+                    f"{('/'+str(fr.get('proveedor'))) if fr.get('proveedor') else ''}]: "
+                    f"{_cop(fr.get('precio'))}"
+                )
+            todas_las_fuentes = " ; ".join(fuentes) if fuentes else None
+
             if not cot.empty:
-                bi = cot["precio"].idxmin()
-                brow = cot.loc[bi]
+                bmin = cot["precio"].idxmin()
+                bmax = cot["precio"].idxmax()
+                rmin, rmax = cot.loc[bmin], cot.loc[bmax]
                 precio_comp_prom = round(float(cot["precio"].mean()), 2)
                 precio_comp_min = round(float(cot["precio"].min()), 2)
                 precio_comp_med = round(float(cot["precio"].median()), 2)
+                precio_comp_max = round(float(cot["precio"].max()), 2)
                 n_comp = int(len(cot))
-                region_comp = brow["region"]
-                prov_comp = brow.get("proveedor", "")
-                arch_comp = brow.get("archivo", "")
-                col_comp = brow.get("columna_precio", "")
-                link_comp = _gcs_link(brow.get("gcs_path", ""))
+                region_comp = rmin["region"]; prov_comp = rmin.get("proveedor", "")
+                region_comp_max = rmax["region"]; prov_comp_max = rmax.get("proveedor", "")
+                arch_comp = rmin.get("archivo", ""); col_comp = rmin.get("columna_precio", "")
+                link_comp = _gcs_link(rmin.get("gcs_path", ""))
 
             if not con.empty:
                 precio_cons_prom = round(float(con["precio"].mean()), 2)
@@ -327,9 +397,6 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         #   ambos      -> w·promedio_consolidado + (1-w)·promedio_comparativo
         #   solo uno   -> el promedio de esa fuente
         w = settings.consolidado_weight
-        def _cop(x):
-            try: return "$" + f"{float(x):,.0f}".replace(",", ".")
-            except Exception: return str(x)
         if precio_cons_prom is not None and precio_comp_prom is not None:
             precio_ref = round(w * precio_cons_prom + (1 - w) * precio_comp_prom, 2)
             tipo_ref = f"Promedio ponderado (Consolidado {int(w*100)}% / Cotización {int((1-w)*100)}%)"
@@ -384,7 +451,10 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             por_encima_ipc = precio_ref > valor_wh_ipc
 
         if precio_ref is not None:
-            nuevo_valor = round(precio_ref, 2)
+            # (5) El valor de actualización proyecta el precio de referencia por
+            # el IPC (no se escribe el valor de mercado tal cual).
+            ipc_factor = (1 + settings.ipc_variation) if settings.apply_ipc_to_warehouse else 1.0
+            nuevo_valor = round(precio_ref * ipc_factor, 2)
             actualizado = True
             updates[int(row["_sheet_row"])] = nuevo_valor
         else:
@@ -409,9 +479,13 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             "precio_comparativo_promedio": precio_comp_prom,
             "precio_comparativo_min": precio_comp_min,
             "precio_comparativo_mediana": precio_comp_med,
+            "precio_comparativo_max": precio_comp_max,
             "n_cotizaciones": n_comp,
             "region_mejor_comparativo": region_comp,
             "proveedor_comparativo": prov_comp,
+            "region_comparativo_max": region_comp_max,
+            "proveedor_comparativo_max": prov_comp_max,
+            "todas_las_fuentes": todas_las_fuentes,
             # Gasto real (Consolidado)
             "precio_consolidado_promedio": precio_cons_prom,
             "precio_consolidado_mediana": precio_cons_med,

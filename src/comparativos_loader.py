@@ -245,28 +245,27 @@ def _select_price_cols(header: list, rule: "FileRule") -> list:
             return False
         return any(_norm_header(a).replace(" ", "") in cc for a in _HARD_EXCLUDE)
 
-    # 0) Override explícito del config: el alias de "mejor precio"/columna final.
-    #    Máxima prioridad y verificable por archivo.
+    # 0) Override explícito del config (verificable por archivo).
     if rule.best_price_alias:
         bpa = _norm_header(rule.best_price_alias).replace(" ", "")
         ov = [i for i, cc in enumerate(norm) if bpa and bpa in cc and not is_iva_or_pct(cc)]
         if ov:
             return ov
-    # 1) Precio unitario total (con IVA): máxima prioridad heurística.
-    ut = [i for i, cc in enumerate(norm) if "unitario" in cc and "total" in cc and not is_iva_or_pct(cc)]
-    if ut:
-        return ut
-    # 2) Vr/Valor unitario por proveedor.
-    vu = [i for i, cc in enumerate(norm) if is_unitario(cc)]
+    # 1) Precio unitario ANTES de IVA (base de comparación con el consolidado).
+    antes = [i for i, cc in enumerate(norm)
+             if ("costodirecto" in cc or "antesdeiva" in cc or "siniva" in cc)
+             and not is_iva_or_pct(cc) and not is_rowtotal(cc)]
+    if antes:
+        return antes
+    # 2) Vr/Valor unitario por proveedor (sin IVA y sin ser total de fila).
+    vu = [i for i, cc in enumerate(norm) if is_unitario(cc) and "total" not in cc]
     if vu:
         return vu
-    # 3) Patrón "ANTES DE IVA / IVA / TOTAL": el precio con IVA es la columna TOTAL.
-    hay_iva = any("iva" in cc for cc in norm)
-    if hay_iva:
-        tot = [i for i, cc in enumerate(norm)
-               if "total" in cc and not is_rowtotal(cc) and not is_iva_or_pct(cc) and "unitario" not in cc]
-        if tot:
-            return tot
+    # 3) Si el patrón es ANTES DE IVA / IVA / TOTAL y no se halló antes-de-iva,
+    #    usar 'unitario' (cualquiera) excluyendo iva/total de fila.
+    vu2 = [i for i, cc in enumerate(norm) if is_unitario(cc)]
+    if vu2:
+        return vu2
     # 4) Alias del config, excluyendo lo prohibido y los totales de fila.
     pa = [i for i, cc in enumerate(norm)
           if any(_norm_header(a).replace(" ", "") in cc for a in (rule.price_aliases or []))
