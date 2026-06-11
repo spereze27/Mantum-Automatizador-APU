@@ -270,6 +270,14 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 metodo = "gemini"
 
         matched = cand_norm is not None
+        # Conjunto de variantes del catálogo que cruzan con este insumo (no solo
+        # la idéntica): así se juntan el mismo insumo descrito distinto en cada
+        # fuente (comparativo y consolidado).
+        match_norms = set()
+        if matched:
+            match_norms.add(cand_norm)
+            for v in matcher.match_many(desc, und, limit=15):
+                match_norms.add(v["norm"])
         # --- Agregación separada por fuente (se usa PROMEDIO) ---
         precio_comp_prom = precio_comp_min = precio_comp_med = n_comp = None
         region_comp = prov_comp = link_comp = arch_comp = col_comp = None
@@ -277,7 +285,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         link_cons = arch_cons = None
 
         if matched and not comp.empty:
-            grp = comp[comp["item_norm"] == cand_norm]
+            grp = comp[comp["item_norm"].isin(match_norms)]
             cot = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"]
             con = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"]
 

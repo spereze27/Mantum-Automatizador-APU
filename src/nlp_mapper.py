@@ -181,6 +181,32 @@ class ItemMatcher:
             self._embeddings = None
             print(f"[nlp_mapper] embeddings deshabilitados: {exc}")
 
+    def match_many(self, description: str, unit: str = "", limit: int = 15) -> list[dict]:
+        """Devuelve TODAS las variantes del catálogo que cruzan con el insumo por
+        encima del umbral (no solo la mejor). Sirve para juntar el mismo insumo
+        descrito distinto en varias fuentes (ej. 'SIKASIL E' y 'SIKASIL E
+        TRANSPARENTE CARTUCHO 280 ML')."""
+        norm = normalize(description)
+        if not norm or not self._norm:
+            return []
+
+        def _blended(a: str, b: str) -> float:
+            return 0.6 * fuzz.token_set_ratio(a, b) + 0.4 * fuzz.token_sort_ratio(a, b)
+
+        scored = process.extract(norm, self._norm, scorer=_blended, limit=limit)
+        out = []
+        for cand_norm, score in scored:
+            if score < self.fuzzy_threshold:
+                continue
+            idx = self._norm.index(cand_norm)
+            out.append({
+                "norm": cand_norm,
+                "raw": self._raw[idx],
+                "score": float(score),
+                "unit_match": self._unit_match(unit, idx),
+            })
+        return out
+
     def match(self, description: str, unit: str = "") -> MatchResult:
         norm = normalize(description)
         if not norm or not self._norm:

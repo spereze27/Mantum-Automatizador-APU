@@ -78,7 +78,7 @@ class Settings:
 
     # --- Matching NLP ---
     # Umbral mínimo (0-100) de score fuzzy para aceptar un cruce 1 a 1.
-    fuzzy_threshold: int = field(default_factory=lambda: int(os.getenv("FUZZY_THRESHOLD", "78")))
+    fuzzy_threshold: int = field(default_factory=lambda: int(os.getenv("FUZZY_THRESHOLD", "70")))
     # Si "true" usa embeddings (sentence-transformers) como desempate/segunda pasada.
     use_embeddings: bool = field(
         default_factory=lambda: os.getenv("USE_EMBEDDINGS", "false").lower() == "true"
