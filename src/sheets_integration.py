@@ -54,14 +54,23 @@ class WarehouseSheet:
         self._header: list[str] = []
 
     def read(self) -> pd.DataFrame:
-        """Lee la hoja respetando que el encabezado está en `header_row`."""
-        values = self._ws.get_all_values()
+        """Lee la hoja respetando que el encabezado está en `header_row`.
+
+        Usa UNFORMATTED_VALUE para que los números lleguen como números (no como
+        texto '1.774' con separador de miles), evitando errores de escala.
+        """
+        try:
+            values = self._ws.get_values(value_render_option="UNFORMATTED_VALUE")
+        except Exception:
+            values = self._ws.get_all_values()
         if len(values) < self.header_row:
             return pd.DataFrame()
         self._header = [str(h).strip() for h in values[self.header_row - 1]]
         data = values[self.header_row :]
+        # Normaliza el largo de cada fila al del encabezado.
+        ncol = len(self._header)
+        data = [(row + [None] * (ncol - len(row)))[:ncol] for row in data]
         df = pd.DataFrame(data, columns=self._header)
-        # Guarda el número de fila real en el Sheet para escrituras puntuales.
         df["_sheet_row"] = range(self.header_row + 1, self.header_row + 1 + len(df))
         return df
 

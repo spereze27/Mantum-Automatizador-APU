@@ -77,6 +77,15 @@ files:
   - match: "Plomeria_Ingant_Oriente_Ant"
     region: "Oriente Antioqueño"
     format: "proveedores_xlsx"
+  - match: "Amoblamiento_Ingant_Oriente_Ant"
+    region: "Oriente Antioqueño"
+    format: "proveedores_xlsx"
+  - match: "EPP_Ingant_Oriente_Ant"
+    region: "Oriente Antioqueño"
+    format: "proveedores_xlsx"
+  - match: "Ferreteria_Ingant_Oriente_Ant"
+    region: "Oriente Antioqueño"
+    format: "proveedores_xlsx"
 
   # --- Acuerdos macro de precios ---
   - match: "MABC_Manizales"

@@ -21,3 +21,6 @@ python-Levenshtein==0.25.1
 # --- Embeddings (OPCIONAL: solo si USE_EMBEDDINGS=true) ---
 # Pesa varios cientos de MB (torch). Descomentar y reconstruir imagen para usarlo.
 # sentence-transformers==3.0.1
+
+# --- Gemini / Vertex AI (OPCIONAL: solo si USE_GEMINI=true) ---
+google-cloud-aiplatform==1.71.1

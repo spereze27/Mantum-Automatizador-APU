@@ -50,9 +50,9 @@ class ComparativosConfig:
         self.rules = [FileRule(**r) for r in raw.get("files", [])]
 
     def rule_for(self, filename: str) -> Optional[FileRule]:
-        low = filename.lower()
+        fn = _slug(filename)
         for r in self.rules:
-            if r.match.lower() in low:
+            if _slug(r.match) in fn:
                 return self._with_defaults(r)
         return None
 
@@ -74,35 +74,31 @@ _MONEY_RE = re.compile(r"[^\d,.\-]")
 
 
 def to_number(value) -> Optional[float]:
-    """Convierte strings tipo '$ 1.234.567,89' o '12,300' a float COP."""
+    """Convierte a float COP. Convención colombiana ESTRICTA:
+    punto = separador de miles, coma = separador decimal.
+    Ej: '1.774' -> 1774 ; '2.075,56' -> 2075.56 ; '$ 379.015' -> 379015.
+    """
     if value is None:
         return None
     if isinstance(value, (int, float)):
         v = float(value)
         return v if v >= 5 else None
     s = str(value).strip()
-    if not s or s.upper() in {"#N/D", "N/D", "NA", "-"}:
+    if not s or s.upper() in {"#N/D", "N/D", "NA", "-", "#REF!", "#VALUE!"}:
         return None
-    s = _MONEY_RE.sub("", s)
-    if not s:
+    s = _MONEY_RE.sub("", s)  # deja solo dígitos, . , -
+    if not s or s in {"-", ".", ","}:
         return None
-    # Heurística separador miles/decimales (formato COP: punto miles, coma decimal).
-    if "," in s and "." in s:
+    if "," in s:
+        # coma decimal -> los puntos son miles
         s = s.replace(".", "").replace(",", ".")
-    elif "," in s:
-        # coma como decimal si hay 1-2 dígitos tras ella, si no es miles.
-        if re.search(r",\d{1,2}$", s):
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", "")
     else:
-        # solo puntos: si parece miles (xxx.xxx) quitarlos.
-        if re.search(r"\.\d{3}(\.\d{3})*$", s) and not re.search(r"\.\d{1,2}$", s):
-            s = s.replace(".", "")
+        # solo puntos (o ninguno) -> en COP los puntos son miles
+        s = s.replace(".", "")
     try:
-        num = float(s)
-        # Piso para descartar ruido (cantidades=1, factores IVA=0.19, etc.).
-        return num if num >= 5 else None
+        v = float(s)
+        # Piso para descartar ruido (cantidades=1, factores IVA, etc.).
+        return v if v >= 5 else None
     except ValueError:
         return None
 
@@ -113,6 +109,26 @@ def _norm_header(x) -> str:
     s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _slug(s: str) -> str:
+    """Reduce un nombre a solo alfanuméricos en minúscula, para comparar
+    nombres de archivo de forma robusta a espacios, guiones, puntos y mayúsculas.
+    Ej: 'Barranquilla V.02.pdf' -> 'barranquillav02pdf' contiene 'barranquillav02'."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def _slug(s: str) -> str:
+    """Reduce un nombre a solo letras/dígitos en minúscula para comparar nombres
+    de archivo de forma robusta a espacios, puntos, guiones y mayúsculas.
+    Ej: 'Barranquilla V.02.pdf' -> 'barranquillav02pdf'."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", str(s))
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
 def _detect_header_row(df: pd.DataFrame, keywords: list) -> Optional[int]:
@@ -296,6 +312,8 @@ def load_from_gcs(bucket_name: str, prefix: str, config_path: str, storage_clien
         try:
             df = _dispatch(content, filename, rule)
             if not df.empty:
+                df["gcs_path"] = blob.name
+                df["fuente_tipo"] = "Cotización proveedor"
                 frames.append(df)
                 print(f"[comparativos] {filename}: {len(df)} precios ({rule.region}).")
             else:

@@ -8,6 +8,7 @@ resource "google_project_service" "apis" {
     "iam.googleapis.com",
     "iamcredentials.googleapis.com",
     "sts.googleapis.com",
+    "aiplatform.googleapis.com",
     "sheets.googleapis.com",
     "drive.googleapis.com",
     "artifactregistry.googleapis.com",

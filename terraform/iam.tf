@@ -15,6 +15,13 @@ resource "google_storage_bucket_iam_member" "sa_bucket_object_admin" {
   member = "serviceAccount:${google_service_account.apu_sa.email}"
 }
 
+# Permite a la runtime SA invocar modelos Gemini en Vertex AI (USE_GEMINI=true).
+resource "google_project_iam_member" "sa_vertex_user" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.apu_sa.email}"
+}
+
 # NOTA sobre Google Sheets:
 # El acceso a Sheets NO se concede con un rol IAM de proyecto. La SA debe ser
 # COMPARTIDA como "Editor" directamente en el documento de Google Sheets.

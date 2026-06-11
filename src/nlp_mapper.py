@@ -236,3 +236,23 @@ class ItemMatcher:
         if not u:
             return False
         return u == self._units[idx] or u in self._units[idx] or self._units[idx] in u
+
+    def top_candidates(self, description: str, k: int = 8) -> list[dict]:
+        """Devuelve los k mejores candidatos fuzzy (para pasarle a Gemini)."""
+        norm = normalize(description)
+        if not norm or not self._norm:
+            return []
+        scored = process.extract(norm, self._norm, scorer=fuzz.token_set_ratio, limit=k)
+        out = []
+        for cand_norm, score in scored:
+            idx = self._norm.index(cand_norm)
+            out.append(
+                {
+                    "index": idx,
+                    "raw": self._raw[idx],
+                    "norm": cand_norm,
+                    "unit": self._units[idx],
+                    "fuzzy_score": float(score),
+                }
+            )
+        return out

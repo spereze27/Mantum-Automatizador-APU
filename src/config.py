@@ -29,6 +29,10 @@ class Settings:
     gcs_input_prefix: str = field(default_factory=lambda: os.getenv("GCS_INPUT_PREFIX", "comparativos/"))
     # Prefijo donde se escribe el reporte analítico de salida.
     gcs_output_prefix: str = field(default_factory=lambda: os.getenv("GCS_OUTPUT_PREFIX", "reportes/"))
+    # Prefijo del Consolidado de controles presupuestales (gasto real).
+    gcs_consolidado_prefix: str = field(
+        default_factory=lambda: os.getenv("GCS_CONSOLIDADO_PREFIX", "consolidado/")
+    )
 
     # --- Google Sheets (warehouse) ---
     warehouse_sheet_url: str = field(default_factory=lambda: os.getenv("WAREHOUSE_SHEET_URL", ""))
@@ -67,6 +71,25 @@ class Settings:
     )
     embedding_threshold: float = field(
         default_factory=lambda: _get_float("EMBEDDING_THRESHOLD", 0.62)
+    )
+
+    # --- Gemini (Vertex AI) para cruces dudosos ---
+    use_gemini: bool = field(
+        default_factory=lambda: os.getenv("USE_GEMINI", "false").lower() == "true"
+    )
+    gemini_model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
+    gemini_location: str = field(
+        default_factory=lambda: os.getenv("GEMINI_LOCATION", os.getenv("GCP_REGION", "us-central1"))
+    )
+    # Solo se consulta a Gemini cuando el fuzzy queda en esta banda dudosa
+    # [gemini_min_score, fuzzy_threshold). Evita gastar llamadas en lo obvio.
+    gemini_min_score: int = field(default_factory=lambda: int(os.getenv("GEMINI_MIN_SCORE", "55")))
+    gemini_max_candidates: int = field(
+        default_factory=lambda: int(os.getenv("GEMINI_MAX_CANDIDATES", "8"))
+    )
+    # Confianza mínima (0-100) que debe devolver Gemini para aceptar el cruce.
+    gemini_min_confidence: int = field(
+        default_factory=lambda: int(os.getenv("GEMINI_MIN_CONFIDENCE", "70"))
     )
 
     # --- Comparativos config ---

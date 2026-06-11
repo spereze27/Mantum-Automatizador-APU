@@ -1,9 +1,7 @@
-project_id          = "mi-proyecto-gcp"
+project_id          = "project-452fd151-b35e-42c3-9e8"
 region              = "us-central1"
-bucket_name         = "apu-comparativos-bucket-unico"
-warehouse_sheet_url = "https://docs.google.com/spreadsheets/d/1tHcxmpupqf-QHCU53kW0VxZzOsRY8yIb/edit"
-ipc_variation       = "0.0528"
-image_tag           = "latest"
+bucket_name         = "mantum-apu-comparativos-452fd151"
+artifact_repo       = "apu-images"
 
-# Ej: permitir que la SA de Cloud Scheduler invoque el servicio.
-# invoker_members = ["serviceAccount:scheduler-sa@mi-proyecto-gcp.iam.gserviceaccount.com"]
+# Repo de GitHub autorizado para desplegar vía WIF (sin claves). Formato owner/repo.
+github_repo         = "TU_USUARIO/Mantum-Automatizador-APU"
