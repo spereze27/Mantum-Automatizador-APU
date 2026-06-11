@@ -70,6 +70,30 @@ def _to_float(x) -> Optional[float]:
     return to_number(x)
 
 
+def _resolve_col(df, wanted: str) -> Optional[str]:
+    """Encuentra el nombre real de una columna tolerando mayúsculas, tildes,
+    espacios y puntuación. 'Vr Unitario' resuelve 'Vr. Unitario', 'VR UNITARIO ', etc."""
+    import re as _re
+    import unicodedata as _ud
+    if wanted in df.columns:
+        return wanted
+
+    def norm(s):
+        s = _ud.normalize("NFKD", str(s))
+        s = "".join(c for c in s if not _ud.combining(c))
+        return _re.sub(r"[^a-z0-9]", "", s.lower())
+
+    w = norm(wanted)
+    for c in df.columns:
+        if norm(c) == w:
+            return c
+    for c in df.columns:  # coincidencia parcial como último recurso
+        nc = norm(c)
+        if nc and (w in nc or nc in w):
+            return c
+    return None
+
+
 def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
     settings.validate()
     result = PipelineResult(dry_run=settings.dry_run, started_at=dt.datetime.utcnow().isoformat())
@@ -93,15 +117,25 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         return result
 
     # Insumos evaluables: filas con descripción, valor y grupo cruzable.
-    C_COD = settings.wh_col_codigo
-    C_DESC = settings.wh_col_desc
-    C_UND = settings.wh_col_und
-    C_PRECIO = settings.wh_col_precio
-    C_GRUPO = settings.wh_col_grupo
-    wh["_grupo_norm"] = wh.get(C_GRUPO, "").astype(str).str.strip().str.lower()
-    wh["_valor"] = wh.get(C_PRECIO, "").map(_to_float)
+    C_COD = _resolve_col(wh, settings.wh_col_codigo)
+    C_DESC = _resolve_col(wh, settings.wh_col_desc)
+    C_UND = _resolve_col(wh, settings.wh_col_und)
+    C_PRECIO = _resolve_col(wh, settings.wh_col_precio)
+    C_GRUPO = _resolve_col(wh, settings.wh_col_grupo)
+    if C_DESC is None or C_PRECIO is None or C_GRUPO is None:
+        result.errors.append(
+            "No encuentro columnas del warehouse. "
+            f"Buscaba descripción='{settings.wh_col_desc}', precio='{settings.wh_col_precio}', "
+            f"grupo='{settings.wh_col_grupo}'. Columnas disponibles: {list(wh.columns)}. "
+            "Revisa WAREHOUSE_TAB/WAREHOUSE_HEADER_ROW y las variables WH_COL_*."
+        )
+        result.finished_at = dt.datetime.utcnow().isoformat()
+        return result
+
+    wh["_grupo_norm"] = wh[C_GRUPO].astype(str).str.strip().str.lower()
+    wh["_valor"] = wh[C_PRECIO].map(_to_float)
     mask = (
-        wh.get(C_DESC, "").astype(str).str.strip().ne("")
+        wh[C_DESC].astype(str).str.strip().ne("")
         & wh["_valor"].notna()
         & wh["_grupo_norm"].isin(MATCHABLE_GROUPS)
     )
