@@ -38,6 +38,12 @@ class Settings:
     consolidado_weight: float = field(
         default_factory=lambda: float(os.getenv("CONSOLIDADO_WEIGHT", "0.7"))
     )
+    # Control de cordura: si la referencia de mercado es más de N veces mayor o
+    # menor que el valor del warehouse, el cruce se descarta (probable unidad o
+    # alcance distinto, p.ej. una tarifa por m2 vs un contrato global).
+    max_price_ratio: float = field(
+        default_factory=lambda: float(os.getenv("MAX_PRICE_RATIO", "8"))
+    )
 
     # --- Google Sheets (warehouse) ---
     warehouse_sheet_url: str = field(default_factory=lambda: os.getenv("WAREHOUSE_SHEET_URL", ""))

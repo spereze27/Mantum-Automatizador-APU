@@ -29,6 +29,7 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
         "precio_referencia", "como_se_calculo", "de_donde_salio_el_precio",
         "fuente_que_refuta", "enlace_fuente",
         "diferencia_vs_ipc", "pct_diferencia", "warehouse_por_debajo_del_mercado",
+        "descartado_por_magnitud",
         "nuevo_valor", "actualizado",
     ]
     existing = [c for c in cols if c in matches.columns]

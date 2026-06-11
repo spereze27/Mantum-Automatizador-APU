@@ -354,6 +354,21 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             fuente_ref = tipo_ref = link_ref = region_ref = prov_ref = None
             de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
+        # Guardia de cordura por magnitud: descarta referencias desproporcionadas
+        # (p.ej. una tarifa por m2 cruzada contra un 'MANO DE OBRA' global).
+        descartado_magnitud = False
+        if precio_ref is not None and valor_wh_ipc:
+            ratio = precio_ref / valor_wh_ipc
+            if ratio > settings.max_price_ratio or ratio < 1.0 / settings.max_price_ratio:
+                descartado_magnitud = True
+                de_donde = (
+                    f"DESCARTADO por magnitud: referencia {_cop(precio_ref)} vs warehouse "
+                    f"{_cop(valor_wh_ipc)} (relación {ratio:.0f}x; probable unidad/alcance distinto). "
+                    f"Candidato dudoso: '{candidato}'."
+                )
+                precio_ref = None
+                fuente_ref = tipo_ref = link_ref = None
+
         diferencia_vs_ipc = pct_diferencia = por_encima_ipc = None
         if precio_ref is not None and valor_wh_ipc:
             diferencia_vs_ipc = round(valor_wh_ipc - precio_ref, 2)  # + = ahorro
@@ -404,6 +419,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             "diferencia_vs_ipc": diferencia_vs_ipc,
             "pct_diferencia": pct_diferencia,
             "warehouse_por_debajo_del_mercado": por_encima_ipc,
+            "descartado_por_magnitud": descartado_magnitud,
             "nuevo_valor": nuevo_valor,
             "actualizado": actualizado,
             "_sheet_row": int(row["_sheet_row"]),
