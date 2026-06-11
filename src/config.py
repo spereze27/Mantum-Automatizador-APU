@@ -33,12 +33,23 @@ class Settings:
     gcs_consolidado_prefix: str = field(
         default_factory=lambda: os.getenv("GCS_CONSOLIDADO_PREFIX", "consolidado/")
     )
+    # Peso del Consolidado (gasto real) al promediar con las cotizaciones para
+    # decidir el precio actualizado. 0.7 = prioriza el gasto real.
+    consolidado_weight: float = field(
+        default_factory=lambda: float(os.getenv("CONSOLIDADO_WEIGHT", "0.7"))
+    )
 
     # --- Google Sheets (warehouse) ---
     warehouse_sheet_url: str = field(default_factory=lambda: os.getenv("WAREHOUSE_SHEET_URL", ""))
-    warehouse_tab: str = field(default_factory=lambda: os.getenv("WAREHOUSE_TAB", "BD APU MTTO"))
+    warehouse_tab: str = field(default_factory=lambda: os.getenv("WAREHOUSE_TAB", "PRIMARIOS"))
     # Fila (1-indexed) donde están los encabezados de la hoja del warehouse.
     warehouse_header_row: int = field(default_factory=lambda: int(os.getenv("WAREHOUSE_HEADER_ROW", "2")))
+    # Nombres de columna del warehouse (por defecto, los de la hoja PRIMARIOS).
+    wh_col_codigo: str = field(default_factory=lambda: os.getenv("WH_COL_CODIGO", "Código"))
+    wh_col_desc: str = field(default_factory=lambda: os.getenv("WH_COL_DESC", "Nombre"))
+    wh_col_und: str = field(default_factory=lambda: os.getenv("WH_COL_UND", "Und"))
+    wh_col_precio: str = field(default_factory=lambda: os.getenv("WH_COL_PRECIO", "Vr Unitario"))
+    wh_col_grupo: str = field(default_factory=lambda: os.getenv("WH_COL_GRUPO", "Grupo"))
 
     # --- Credenciales ---
     # En Cloud Run se usa la SA del runtime (ADC). En local/CI se puede pasar el

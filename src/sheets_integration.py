@@ -37,6 +37,23 @@ def _credentials(sa_key_json: str = "", sa_key_path: str = ""):
     return creds
 
 
+
+def _dedupe_headers(headers):
+    """Hace únicos los nombres de encabezado repetidos o vacíos (ej. PRIMARIOS
+    trae varias columnas 'Grupo' y celdas vacías), para que pandas no falle."""
+    seen = {}
+    out = []
+    for i, h in enumerate(headers):
+        name = h if h else f"col_{i}"
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}.{seen[name]}"
+        else:
+            seen[name] = 0
+        out.append(name)
+    return out
+
+
 class WarehouseSheet:
     def __init__(
         self,
@@ -65,7 +82,7 @@ class WarehouseSheet:
             values = self._ws.get_all_values()
         if len(values) < self.header_row:
             return pd.DataFrame()
-        self._header = [str(h).strip() for h in values[self.header_row - 1]]
+        self._header = _dedupe_headers([str(h).strip() for h in values[self.header_row - 1]])
         data = values[self.header_row :]
         # Normaliza el largo de cada fila al del encabezado.
         ncol = len(self._header)

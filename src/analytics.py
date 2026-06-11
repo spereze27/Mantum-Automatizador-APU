@@ -19,9 +19,14 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
     precio, el enlace a ella y la diferencia frente al escenario solo-IPC."""
     cols = [
         "codigo", "descripcion_wh", "und_wh", "grupo", "categoria",
-        "candidato_comparativo", "score", "metodo", "unidad_coincide",
-        "valor_wh", "valor_wh_ipc", "mejor_precio_comparativo", "region_mejor_precio",
-        "fuente_que_refuta", "proveedor_fuente", "tipo_fuente", "enlace_fuente",
+        "candidato", "score", "metodo", "unidad_coincide",
+        "valor_wh", "valor_wh_ipc",
+        "precio_comparativo_promedio", "precio_comparativo_min",
+        "precio_comparativo_mediana", "n_cotizaciones",
+        "region_mejor_comparativo", "proveedor_comparativo",
+        "precio_consolidado_promedio", "precio_consolidado_mediana",
+        "precio_consolidado_min", "precio_consolidado_max", "n_facturas_consolidado",
+        "precio_referencia", "como_se_calculo", "fuente_que_refuta", "enlace_fuente",
         "diferencia_vs_ipc", "pct_diferencia", "warehouse_por_debajo_del_mercado",
         "nuevo_valor", "actualizado",
     ]
@@ -179,6 +184,7 @@ def build_excel_report(
     regional_pivot_df: pd.DataFrame,
     stats: Optional[dict] = None,
     conclusiones: Optional[list] = None,
+    consolidado_planta: Optional[pd.DataFrame] = None,
 ) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -193,6 +199,10 @@ def build_excel_report(
         (mapping if not mapping.empty else pd.DataFrame({"info": ["sin datos"]})).to_excel(
             writer, sheet_name="Mapping y Refutacion", index=False
         )
+        if consolidado_planta is not None and not consolidado_planta.empty:
+            consolidado_planta.sort_values(["insumo", "planta_region"]).to_excel(
+                writer, sheet_name="Consolidado por Planta", index=False
+            )
         (outliers if not outliers.empty else pd.DataFrame({"info": ["sin outliers"]})).to_excel(
             writer, sheet_name="Analisis Outliers", index=False
         )

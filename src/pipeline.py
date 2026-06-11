@@ -86,10 +86,15 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         return result
 
     # Insumos evaluables: filas con descripción, valor y grupo cruzable.
-    wh["_grupo_norm"] = wh.get(COL_GRUPO, "").astype(str).str.strip().str.lower()
-    wh["_valor"] = wh.get(COL_VR_UNIT, "").map(_to_float)
+    C_COD = settings.wh_col_codigo
+    C_DESC = settings.wh_col_desc
+    C_UND = settings.wh_col_und
+    C_PRECIO = settings.wh_col_precio
+    C_GRUPO = settings.wh_col_grupo
+    wh["_grupo_norm"] = wh.get(C_GRUPO, "").astype(str).str.strip().str.lower()
+    wh["_valor"] = wh.get(C_PRECIO, "").map(_to_float)
     mask = (
-        wh.get(COL_DESC, "").astype(str).str.strip().ne("")
+        wh.get(C_DESC, "").astype(str).str.strip().ne("")
         & wh["_valor"].notna()
         & wh["_grupo_norm"].isin(MATCHABLE_GROUPS)
     )
@@ -163,22 +168,31 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         if not gemini.enabled:
             gemini = None
 
-    # Índice de comparativos por ítem normalizado para hallar mejor precio/región.
+    # Índice por ítem normalizado; conserva el tipo de fuente para separar
+    # cotizaciones (comparativos) del gasto real (Consolidado).
     comp = comparativos.copy()
     if not comp.empty:
         comp["item_norm"] = comp["descripcion"].map(normalize)
 
+    def _gcs_link(gpath: str) -> Optional[str]:
+        gpath = gpath or ""
+        if not gpath:
+            return None
+        return (
+            f"https://console.cloud.google.com/storage/browser/_details/"
+            f"{settings.gcs_bucket_name}/{gpath}"
+        )
+
     records = []
+    consolidado_por_planta = []  # filas insumo x planta para el reporte
     updates: dict[int, float] = {}
     for _, row in insumos.iterrows():
-        desc = str(row.get(COL_DESC, "")).strip()
-        und = str(row.get(COL_UND, "")).strip()
+        desc = str(row.get(C_DESC, "")).strip()
+        und = str(row.get(C_UND, "")).strip()
         valor_wh = row["_valor"]
         valor_wh_ipc = apply_ipc(valor_wh, settings.ipc_variation, settings.apply_ipc_to_warehouse)
 
         m = matcher.match(desc, und)
-        mejor_precio = None
-        region_best = None
         metodo = m.method
         score = m.score
         candidato = m.candidate_raw
@@ -200,40 +214,87 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 metodo = "gemini"
 
         matched = cand_norm is not None
-        fuente_archivo = None
-        fuente_proveedor = None
-        fuente_tipo = None
-        fuente_link = None
+        # --- Agregación separada por fuente (se usa PROMEDIO) ---
+        precio_comp_prom = precio_comp_min = precio_comp_med = n_comp = None
+        region_comp = prov_comp = link_comp = arch_comp = None
+        precio_cons_prom = precio_cons_med = precio_cons_min = precio_cons_max = n_cons = None
+        link_cons = arch_cons = None
+
         if matched and not comp.empty:
             grp = comp[comp["item_norm"] == cand_norm]
-            if not grp.empty:
-                best_idx = grp["precio"].idxmin()
-                brow = grp.loc[best_idx]
-                mejor_precio = float(brow["precio"])
-                region_best = brow["region"]
-                fuente_archivo = brow.get("archivo", "")
-                fuente_proveedor = brow.get("proveedor", "")
-                fuente_tipo = brow.get("fuente_tipo", "")
-                gpath = brow.get("gcs_path", "") or ""
-                if gpath:
-                    fuente_link = (
-                        f"https://console.cloud.google.com/storage/browser/_details/"
-                        f"{settings.gcs_bucket_name}/{gpath}"
-                    )
+            cot = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"]
+            con = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"]
 
-        # Diferencia vs. el escenario "solo IPC".
-        diferencia_vs_ipc = None
-        pct_diferencia = None
-        por_encima_ipc = None
-        if matched and mejor_precio is not None and valor_wh_ipc:
-            diferencia_vs_ipc = round(valor_wh_ipc - mejor_precio, 2)  # + = ahorro
+            if not cot.empty:
+                bi = cot["precio"].idxmin()
+                brow = cot.loc[bi]
+                precio_comp_prom = round(float(cot["precio"].mean()), 2)
+                precio_comp_min = round(float(cot["precio"].min()), 2)
+                precio_comp_med = round(float(cot["precio"].median()), 2)
+                n_comp = int(len(cot))
+                region_comp = brow["region"]
+                prov_comp = brow.get("proveedor", "")
+                arch_comp = brow.get("archivo", "")
+                link_comp = _gcs_link(brow.get("gcs_path", ""))
+
+            if not con.empty:
+                precio_cons_prom = round(float(con["precio"].mean()), 2)
+                precio_cons_med = round(float(con["precio"].median()), 2)
+                precio_cons_min = round(float(con["precio"].min()), 2)
+                precio_cons_max = round(float(con["precio"].max()), 2)
+                n_cons = int(len(con))
+                arch_cons = con.iloc[0].get("archivo", "")
+                link_cons = _gcs_link(con.iloc[0].get("gcs_path", ""))
+                for reg, sub in con.groupby("region"):
+                    consolidado_por_planta.append({
+                        "codigo": row.get(C_COD, ""),
+                        "insumo": desc,
+                        "categoria": _categoria(row.get(C_GRUPO, "")),
+                        "planta_region": reg,
+                        "precio_real_promedio": round(float(sub["precio"].mean()), 2),
+                        "precio_real_mediana": round(float(sub["precio"].median()), 2),
+                        "n_facturas": int(len(sub)),
+                        "precio_real_min": round(float(sub["precio"].min()), 2),
+                        "precio_real_max": round(float(sub["precio"].max()), 2),
+                    })
+
+        # Precio de referencia = PROMEDIO ponderado priorizando el Consolidado.
+        #   ambos      -> w·promedio_consolidado + (1-w)·promedio_comparativo
+        #   solo uno   -> el promedio de esa fuente
+        w = settings.consolidado_weight
+        if precio_cons_prom is not None and precio_comp_prom is not None:
+            precio_ref = round(w * precio_cons_prom + (1 - w) * precio_comp_prom, 2)
+            tipo_ref = f"Promedio ponderado (Consolidado {int(w*100)}% / Cotización {int((1-w)*100)}%)"
+            fuente_ref = arch_cons
+            link_ref = link_cons
+            region_ref = "Varias fuentes"
+            prov_ref = prov_comp
+        elif precio_cons_prom is not None:
+            precio_ref = precio_cons_prom
+            tipo_ref = "Gasto real (Consolidado) - promedio"
+            fuente_ref = arch_cons
+            link_ref = link_cons
+            region_ref = "Varias plantas"
+            prov_ref = ""
+        elif precio_comp_prom is not None:
+            precio_ref = precio_comp_prom
+            tipo_ref = "Cotización proveedor - promedio"
+            fuente_ref = arch_comp
+            link_ref = link_comp
+            region_ref = region_comp
+            prov_ref = prov_comp
+        else:
+            precio_ref = None
+            fuente_ref = tipo_ref = link_ref = region_ref = prov_ref = None
+
+        diferencia_vs_ipc = pct_diferencia = por_encima_ipc = None
+        if precio_ref is not None and valor_wh_ipc:
+            diferencia_vs_ipc = round(valor_wh_ipc - precio_ref, 2)  # + = ahorro
             pct_diferencia = round((diferencia_vs_ipc / valor_wh_ipc) * 100, 1)
-            por_encima_ipc = mejor_precio > valor_wh_ipc
+            por_encima_ipc = precio_ref > valor_wh_ipc
 
-        # Nuevo valor: mejor precio comparativo cuando hay cruce válido; si no,
-        # se mantiene el valor del warehouse ajustado por IPC.
-        if matched and mejor_precio is not None:
-            nuevo_valor = round(mejor_precio, 2)
+        if precio_ref is not None:
+            nuevo_valor = round(precio_ref, 2)
             actualizado = True
             updates[int(row["_sheet_row"])] = nuevo_valor
         else:
@@ -242,45 +303,56 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             if settings.apply_ipc_to_warehouse:
                 updates[int(row["_sheet_row"])] = nuevo_valor
 
-        records.append(
-            {
-                "codigo": row.get(COL_CODIGO, ""),
-                "descripcion_wh": desc,
-                "und_wh": und,
-                "grupo": row.get(COL_GRUPO, ""),
-                "categoria": _categoria(row.get(COL_GRUPO, "")),
-                "candidato_comparativo": candidato,
-                "score": round(score, 2),
-                "metodo": metodo,
-                "unidad_coincide": m.unit_match,
-                "valor_wh": round(valor_wh, 2),
-                "valor_wh_ipc": valor_wh_ipc,
-                "mejor_precio_comparativo": round(mejor_precio, 2) if mejor_precio else None,
-                "region_mejor_precio": region_best,
-                "fuente_que_refuta": fuente_archivo,
-                "proveedor_fuente": fuente_proveedor,
-                "tipo_fuente": fuente_tipo,
-                "enlace_fuente": fuente_link,
-                "diferencia_vs_ipc": diferencia_vs_ipc,
-                "pct_diferencia": pct_diferencia,
-                "warehouse_por_debajo_del_mercado": por_encima_ipc,
-                "nuevo_valor": nuevo_valor,
-                "actualizado": actualizado,
-                "_sheet_row": int(row["_sheet_row"]),
-            }
-        )
+        records.append({
+            "codigo": row.get(C_COD, ""),
+            "descripcion_wh": desc,
+            "und_wh": und,
+            "grupo": row.get(C_GRUPO, ""),
+            "categoria": _categoria(row.get(C_GRUPO, "")),
+            "candidato": candidato,
+            "score": round(score, 2),
+            "metodo": metodo,
+            "unidad_coincide": m.unit_match,
+            "valor_wh": round(valor_wh, 2),
+            "valor_wh_ipc": valor_wh_ipc,
+            # Cotizaciones (comparativos)
+            "precio_comparativo_promedio": precio_comp_prom,
+            "precio_comparativo_min": precio_comp_min,
+            "precio_comparativo_mediana": precio_comp_med,
+            "n_cotizaciones": n_comp,
+            "region_mejor_comparativo": region_comp,
+            "proveedor_comparativo": prov_comp,
+            # Gasto real (Consolidado)
+            "precio_consolidado_promedio": precio_cons_prom,
+            "precio_consolidado_mediana": precio_cons_med,
+            "precio_consolidado_min": precio_cons_min,
+            "precio_consolidado_max": precio_cons_max,
+            "n_facturas_consolidado": n_cons,
+            # Referencia (promedio ponderado) / refutación
+            "precio_referencia": precio_ref,
+            "como_se_calculo": tipo_ref,
+            "fuente_que_refuta": fuente_ref,
+            "enlace_fuente": link_ref,
+            "diferencia_vs_ipc": diferencia_vs_ipc,
+            "pct_diferencia": pct_diferencia,
+            "warehouse_por_debajo_del_mercado": por_encima_ipc,
+            "nuevo_valor": nuevo_valor,
+            "actualizado": actualizado,
+            "_sheet_row": int(row["_sheet_row"]),
+        })
 
     matches = pd.DataFrame(records)
     result.cruces_validos = int(matches["actualizado"].sum()) if not matches.empty else 0
+    consolidado_planta_df = pd.DataFrame(consolidado_por_planta)
 
     # --- 5. Actualizar el Sheet ---
     if updates and not settings.dry_run:
         try:
-            result.celdas_actualizadas = sheet.batch_update_column(COL_VR_UNIT, updates)
+            result.celdas_actualizadas = sheet.batch_update_column(C_PRECIO, updates)
         except Exception as exc:
             result.errors.append(f"Error actualizando Sheet: {exc}")
     elif settings.dry_run:
-        result.celdas_actualizadas = 0  # No se escribe en modo auditoría.
+        result.celdas_actualizadas = 0
 
     # --- 6. Estadísticos y reporte analítico a GCS ---
     mapping = analytics.build_mapping_report(matches)
@@ -293,7 +365,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
     result.stats = stats
 
     report_bytes = analytics.build_excel_report(
-        mapping, outliers, regional, pivot, stats, conclusiones
+        mapping, outliers, regional, pivot, stats, conclusiones, consolidado_planta_df
     )
 
     ts = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
