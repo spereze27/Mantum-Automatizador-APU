@@ -1,5 +1,7 @@
 # Microservicio APU — Comparativo de Mantenimiento (GCP Cloud Run)
 
+https://apu-comparativo-mtto-285116077661.us-central1.run.app
+
 Consolida, limpia y compara precios unitarios (APU) de mantenimiento. Lee el
 **warehouse** desde Google Sheets, descarga **comparativos** desde un bucket de
 GCS, aplica **IPC**, hace **mapeo 1 a 1 (NLP)**, actualiza el Sheet y genera un
