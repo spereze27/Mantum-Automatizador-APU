@@ -177,6 +177,7 @@ _INDEX_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div id="results" style="display:none">
+    <div id="diag" style="margin-bottom:14px"></div>
     <div class="grid" id="cards"></div>
 
     <div class="section">
@@ -233,6 +234,22 @@ function card(label,value,sub,cls){return `<div class="card ${cls||''}">
   ${sub?`<div class="sub">${sub}</div>`:''}</div>`}
 function render(d){
   const s=d.stats||{};
+  // Diagnóstico: conteos crudos y errores (para detectar fuentes vacías).
+  const diag=document.getElementById('diag');
+  let dhtml='';
+  const warn=(d.comparativos_filas||0)===0;
+  dhtml+=`<div style="background:#fff;border-radius:10px;padding:12px 16px;border-left:6px solid ${warn?'#e23b3b':'#7AB317'};font-size:13px;color:#2B2F33">
+    <b>Diagnóstico:</b> filas warehouse: ${d.rows_warehouse??'-'} ·
+    insumos evaluados: ${d.insumos_evaluados??'-'} ·
+    filas de fuentes (comparativos+consolidado): <b>${d.comparativos_filas??'-'}</b> ·
+    celdas actualizadas: ${d.celdas_actualizadas??'-'}
+    ${warn?'<br>⚠️ No se cargaron precios de fuentes: revisa que los archivos estén en gs://&lt;bucket&gt;/comparativos/ y /consolidado/.':''}
+  </div>`;
+  if((d.errors||[]).length){
+    dhtml+=`<div style="background:#fff;border-radius:10px;padding:12px 16px;border-left:6px solid #e23b3b;font-size:13px;color:#a11;margin-top:8px">
+      <b>Errores:</b><ul style="margin:6px 0 0;padding-left:18px">${d.errors.map(e=>`<li>${e}</li>`).join('')}</ul></div>`;
+  }
+  diag.innerHTML=dhtml;
   const cards=[
     card('Fuentes analizadas', s.fuentes_analizadas??0,'archivos de precios','naranja'),
     card('Registros de precio', (s.registros_precio??0).toLocaleString('es-CO'),'observaciones','oliva'),

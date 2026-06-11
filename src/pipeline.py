@@ -102,12 +102,16 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
     result.insumos_evaluados = len(insumos)
 
     # --- 2. Comparativos (cotizaciones) + Consolidado (gasto real) ---
-    comparativos = load_from_gcs(
-        settings.gcs_bucket_name,
-        settings.gcs_input_prefix,
-        settings.comparativos_config_path,
-        storage_client=storage_client,
-    )
+    try:
+        comparativos = load_from_gcs(
+            settings.gcs_bucket_name,
+            settings.gcs_input_prefix,
+            settings.comparativos_config_path,
+            storage_client=storage_client,
+        )
+    except Exception as exc:
+        comparativos = pd.DataFrame()
+        result.errors.append(f"Comparativos no cargados: {exc}")
     try:
         from .consolidado_loader import load_consolidado_from_gcs
 
@@ -132,6 +136,16 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             parts.append(d[base_cols])
     comparativos = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=base_cols)
     result.comparativos_filas = len(comparativos)
+
+    # Diagnóstico explícito de fuentes vacías (causa típica: archivos no subidos
+    # o prefijo/bucket equivocado).
+    b = settings.gcs_bucket_name
+    if comparativos.empty:
+        result.errors.append(
+            f"No se encontraron precios. Verifica que existan archivos en "
+            f"gs://{b}/{settings.gcs_input_prefix} (comparativos) y "
+            f"gs://{b}/{settings.gcs_consolidado_prefix} (consolidado)."
+        )
 
     # --- 3. IPC sobre comparativos (opcional) ---
     if not comparativos.empty and settings.apply_ipc_to_comparativos:
