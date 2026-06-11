@@ -72,7 +72,7 @@ class Settings:
 
     # --- Matching NLP ---
     # Umbral mínimo (0-100) de score fuzzy para aceptar un cruce 1 a 1.
-    fuzzy_threshold: int = field(default_factory=lambda: int(os.getenv("FUZZY_THRESHOLD", "82")))
+    fuzzy_threshold: int = field(default_factory=lambda: int(os.getenv("FUZZY_THRESHOLD", "78")))
     # Si "true" usa embeddings (sentence-transformers) como desempate/segunda pasada.
     use_embeddings: bool = field(
         default_factory=lambda: os.getenv("USE_EMBEDDINGS", "false").lower() == "true"
@@ -94,7 +94,7 @@ class Settings:
     )
     # Solo se consulta a Gemini cuando el fuzzy queda en esta banda dudosa
     # [gemini_min_score, fuzzy_threshold). Evita gastar llamadas en lo obvio.
-    gemini_min_score: int = field(default_factory=lambda: int(os.getenv("GEMINI_MIN_SCORE", "55")))
+    gemini_min_score: int = field(default_factory=lambda: int(os.getenv("GEMINI_MIN_SCORE", "60")))
     gemini_max_candidates: int = field(
         default_factory=lambda: int(os.getenv("GEMINI_MAX_CANDIDATES", "8"))
     )

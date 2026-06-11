@@ -191,7 +191,7 @@ class ItemMatcher:
         # puede dar 100 cuando un texto es subconjunto trivial del otro (ej. un
         # código "a 3"). Lo mezclamos con token_sort_ratio para penalizar eso.
         def _blended(a: str, b: str) -> float:
-            return 0.5 * fuzz.token_set_ratio(a, b) + 0.5 * fuzz.token_sort_ratio(a, b)
+            return 0.6 * fuzz.token_set_ratio(a, b) + 0.4 * fuzz.token_sort_ratio(a, b)
 
         best = process.extractOne(norm, self._norm, scorer=_blended)
         if best:
