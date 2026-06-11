@@ -44,7 +44,16 @@ async def run(request: Request):
     try:
         result = run_pipeline(settings)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        # Devuelve el error de forma estructurada para que la UI lo muestre
+        # (en vez de un 500 opaco).
+        return JSONResponse(status_code=200, content={
+            "stats": {}, "errors": [f"Fallo del pipeline: {exc}"],
+            "bucket": settings.gcs_bucket_name,
+            "input_prefix": settings.gcs_input_prefix,
+            "consolidado_prefix": settings.gcs_consolidado_prefix,
+            "comparativos_filas": 0, "rows_warehouse": None,
+            "insumos_evaluados": None, "celdas_actualizadas": None,
+        })
     status_code = 200 if not result.errors else 207
     return JSONResponse(status_code=status_code, content=asdict(result))
 
@@ -238,12 +247,15 @@ function render(d){
   const diag=document.getElementById('diag');
   let dhtml='';
   const warn=(d.comparativos_filas||0)===0;
+  const bk=d.bucket||'(sin GCS_BUCKET_NAME)';
   dhtml+=`<div style="background:#fff;border-radius:10px;padding:12px 16px;border-left:6px solid ${warn?'#e23b3b':'#7AB317'};font-size:13px;color:#2B2F33">
     <b>Diagnóstico:</b> filas warehouse: ${d.rows_warehouse??'-'} ·
     insumos evaluados: ${d.insumos_evaluados??'-'} ·
-    filas de fuentes (comparativos+consolidado): <b>${d.comparativos_filas??'-'}</b> ·
+    comparativos: ${d.comparativos_filas??'-'} ·
+    consolidado: ${d.consolidado_filas??'-'} ·
     celdas actualizadas: ${d.celdas_actualizadas??'-'}
-    ${warn?'<br>⚠️ No se cargaron precios de fuentes: revisa que los archivos estén en gs://&lt;bucket&gt;/comparativos/ y /consolidado/.':''}
+    <br><span style="color:#6B7280">Bucket: <b>${bk}</b> · prefijos: ${d.input_prefix||'?'} , ${d.consolidado_prefix||'?'}</span>
+    ${warn?`<br>⚠️ No se cargaron precios. Verifica que existan archivos en gs://${bk}/${d.input_prefix||'comparativos/'} y gs://${bk}/${d.consolidado_prefix||'consolidado/'}.`:''}
   </div>`;
   if((d.errors||[]).length){
     dhtml+=`<div style="background:#fff;border-radius:10px;padding:12px 16px;border-left:6px solid #e23b3b;font-size:13px;color:#a11;margin-top:8px">

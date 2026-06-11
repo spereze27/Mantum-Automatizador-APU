@@ -53,6 +53,10 @@ class PipelineResult:
     cruces_validos: int = 0
     celdas_actualizadas: int = 0
     comparativos_filas: int = 0
+    consolidado_filas: int = 0
+    bucket: str = ""
+    input_prefix: str = ""
+    consolidado_prefix: str = ""
     report_uri: str = ""
     dry_run: bool = False
     started_at: str = ""
@@ -69,6 +73,9 @@ def _to_float(x) -> Optional[float]:
 def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
     settings.validate()
     result = PipelineResult(dry_run=settings.dry_run, started_at=dt.datetime.utcnow().isoformat())
+    result.bucket = settings.gcs_bucket_name
+    result.input_prefix = settings.gcs_input_prefix
+    result.consolidado_prefix = settings.gcs_consolidado_prefix
 
     # --- 1. Warehouse ---
     sheet = WarehouseSheet(
@@ -136,6 +143,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             parts.append(d[base_cols])
     comparativos = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=base_cols)
     result.comparativos_filas = len(comparativos)
+    result.consolidado_filas = int(len(consolidado)) if consolidado is not None and not consolidado.empty else 0
 
     # Diagnóstico explícito de fuentes vacías (causa típica: archivos no subidos
     # o prefijo/bucket equivocado).
