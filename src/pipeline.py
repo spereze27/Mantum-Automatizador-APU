@@ -318,7 +318,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         # --- Agregación separada por fuente (se usa PROMEDIO) ---
         precio_comp_prom = precio_comp_min = precio_comp_med = precio_comp_max = n_comp = None
         region_comp = prov_comp = link_comp = arch_comp = col_comp = None
-        region_comp_max = prov_comp_max = None
+        region_comp_max = prov_comp_max = arch_comp_max = precio_comp_max_audit = None
         precio_cons_prom = precio_cons_med = precio_cons_min = precio_cons_max = n_cons = None
         link_cons = arch_cons = None
         todas_las_fuentes = None
@@ -337,6 +337,17 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 same = grp[grp["_u"] == wh_u]
                 if not same.empty:
                     grp = same
+
+            cot_full = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"]
+            # Máximo REAL de los comparativos (antes del recorte de inflados), para
+            # auditoría: aunque se excluya del promedio, se muestra con su proveedor.
+            precio_comp_max_audit = region_comp_max = prov_comp_max = arch_comp_max = None
+            if not cot_full.empty:
+                rmax = cot_full.loc[cot_full["precio"].idxmax()]
+                precio_comp_max_audit = round(float(cot_full["precio"].max()), 2)
+                region_comp_max = rmax.get("region", "")
+                prov_comp_max = rmax.get("proveedor", "")
+                arch_comp_max = rmax.get("archivo", "")
 
             # (4) Recorte de inflados: descarta precios desproporcionados dentro
             # del propio ítem (p.ej. una 'Lija' a 11.000 cuando casi todas ~2.000).
@@ -360,15 +371,13 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
 
             if not cot.empty:
                 bmin = cot["precio"].idxmin()
-                bmax = cot["precio"].idxmax()
-                rmin, rmax = cot.loc[bmin], cot.loc[bmax]
+                rmin = cot.loc[bmin]
                 precio_comp_prom = round(float(cot["precio"].mean()), 2)
                 precio_comp_min = round(float(cot["precio"].min()), 2)
                 precio_comp_med = round(float(cot["precio"].median()), 2)
-                precio_comp_max = round(float(cot["precio"].max()), 2)
+                precio_comp_max = precio_comp_max_audit  # máximo real (antes de recorte)
                 n_comp = int(len(cot))
                 region_comp = rmin["region"]; prov_comp = rmin.get("proveedor", "")
-                region_comp_max = rmax["region"]; prov_comp_max = rmax.get("proveedor", "")
                 arch_comp = rmin.get("archivo", ""); col_comp = rmin.get("columna_precio", "")
                 link_comp = _gcs_link(rmin.get("gcs_path", ""))
 
@@ -485,6 +494,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             "proveedor_comparativo": prov_comp,
             "region_comparativo_max": region_comp_max,
             "proveedor_comparativo_max": prov_comp_max,
+            "archivo_comparativo_max": arch_comp_max,
             "todas_las_fuentes": todas_las_fuentes,
             # Gasto real (Consolidado)
             "precio_consolidado_promedio": precio_cons_prom,

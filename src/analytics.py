@@ -24,7 +24,7 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
         "precio_comparativo_promedio", "precio_comparativo_min",
         "precio_comparativo_mediana", "precio_comparativo_max", "n_cotizaciones",
         "region_mejor_comparativo", "proveedor_comparativo",
-        "region_comparativo_max", "proveedor_comparativo_max",
+        "region_comparativo_max", "proveedor_comparativo_max", "archivo_comparativo_max",
         "todas_las_fuentes",
         "precio_consolidado_promedio", "precio_consolidado_mediana",
         "precio_consolidado_min", "precio_consolidado_max", "n_facturas_consolidado",

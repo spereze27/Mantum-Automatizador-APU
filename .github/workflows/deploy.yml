@@ -14,8 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write   # necesario si se migra a Workload Identity Federation
-
+      id-token: write   # necesario para Workload Identity Federation
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,12 +58,18 @@ jobs:
             --set-env-vars "GCS_BUCKET_NAME=${{ secrets.GCS_BUCKET_NAME }}" \
             --set-env-vars "GCS_INPUT_PREFIX=comparativos/" \
             --set-env-vars "GCS_OUTPUT_PREFIX=reportes/" \
+            --set-env-vars "GCS_CONSOLIDADO_PREFIX=consolidado/" \
+            --set-env-vars "CONSOLIDADO_WEIGHT=0.7" \
+            --set-env-vars "MAX_PRICE_RATIO=8" \
             --set-env-vars "WAREHOUSE_SHEET_URL=${{ secrets.WAREHOUSE_SHEET_URL }}" \
-            --set-env-vars "WAREHOUSE_TAB=BD APU MTTO" \
+            --set-env-vars "WAREHOUSE_TAB=PRIMARIOS" \
             --set-env-vars "WAREHOUSE_HEADER_ROW=2" \
+            --set-env-vars "WH_COL_PRECIO=Precio de Lista" \
             --set-env-vars "IPC_VARIATION=${{ secrets.IPC_VARIATION }}" \
             --set-env-vars "APPLY_IPC_TO_WAREHOUSE=true" \
             --set-env-vars "APPLY_IPC_TO_COMPARATIVOS=false" \
-            --set-env-vars "FUZZY_THRESHOLD=82" \
+            --set-env-vars "FUZZY_THRESHOLD=70" \
             --set-env-vars "USE_EMBEDDINGS=false" \
+            --set-env-vars "USE_GEMINI=false" \
+            --set-env-vars "GEMINI_MODEL=gemini-2.0-flash" \
             --set-env-vars "DRY_RUN=false"
