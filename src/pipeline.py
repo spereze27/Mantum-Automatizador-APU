@@ -340,17 +340,6 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 if not same.empty:
                     grp = same
 
-            cot_full = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"]
-            # Máximo REAL de los comparativos (antes del recorte de inflados), para
-            # auditoría: aunque se excluya del promedio, se muestra con su proveedor.
-            precio_comp_max_audit = region_comp_max = prov_comp_max = arch_comp_max = None
-            if not cot_full.empty:
-                rmax = cot_full.loc[cot_full["precio"].idxmax()]
-                precio_comp_max_audit = round(float(cot_full["precio"].max()), 2)
-                region_comp_max = rmax.get("region", "")
-                prov_comp_max = rmax.get("proveedor", "")
-                arch_comp_max = rmax.get("archivo", "")
-
             # (4) Recorte de inflados: descarta precios desproporcionados dentro
             # del propio ítem (p.ej. una 'Lija' a 11.000 cuando casi todas ~2.000).
             if len(grp) >= 4:
@@ -361,26 +350,32 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             cot = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"]
             con = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"]
 
-            # (3) Todas las fuentes con info de este ítem (archivo|región|prov|precio).
+            # (3) Todas las fuentes consultadas para este ítem (ya filtradas). El
+            # promedio, mínimo y máximo se calculan sobre EXACTAMENTE estas fuentes.
             fuentes = []
-            for _, fr in grp.sort_values("precio").head(20).iterrows():
+            grp_sorted = grp.sort_values("precio")
+            for _, fr in grp_sorted.head(100).iterrows():
                 fuentes.append(
                     f"{fr.get('archivo','')} [{fr.get('region','')}"
                     f"{('/'+str(fr.get('proveedor'))) if fr.get('proveedor') else ''}]: "
                     f"{_cop(fr.get('precio'))}"
                 )
+            if len(grp_sorted) > 100:
+                fuentes.append(f"(+{len(grp_sorted) - 100} fuentes más)")
             todas_las_fuentes = " ; ".join(fuentes) if fuentes else None
 
             if not cot.empty:
-                bmin = cot["precio"].idxmin()
-                rmin = cot.loc[bmin]
+                rmin = cot.loc[cot["precio"].idxmin()]
+                rmax = cot.loc[cot["precio"].idxmax()]
                 precio_comp_prom = round(float(cot["precio"].mean()), 2)
                 precio_comp_min = round(float(cot["precio"].min()), 2)
                 precio_comp_med = round(float(cot["precio"].median()), 2)
-                precio_comp_max = precio_comp_max_audit  # máximo real (antes de recorte)
+                precio_comp_max = round(float(cot["precio"].max()), 2)  # máximo DESPUÉS del filtro
                 n_comp = int(len(cot))
                 region_comp = rmin["region"]; prov_comp = rmin.get("proveedor", "")
+                region_comp_max = rmax["region"]; prov_comp_max = rmax.get("proveedor", "")
                 arch_comp = rmin.get("archivo", ""); col_comp = rmin.get("columna_precio", "")
+                arch_comp_max = rmax.get("archivo", "")
                 link_comp = _gcs_link(rmin.get("gcs_path", ""))
 
             if not con.empty:

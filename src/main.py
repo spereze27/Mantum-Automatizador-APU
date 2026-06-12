@@ -269,8 +269,6 @@ function render(d){
     card('Ítems cruzados', s.cruces_validos??0,'con fuente válida'),
     card('Más barato que IPC', s.items_mercado_mas_barato_que_ipc??0,'oportunidad de ahorro'),
     card('Más caro que IPC', s.items_mercado_mas_caro_que_ipc??0,'revisar','naranja'),
-    card('Ahorro potencial', cop(s.ahorro_potencial_total),'vs. ajuste solo IPC'),
-    card('Diferencia neta', cop(s.diferencia_neta_total),'mercado vs IPC','amarillo'),
   ].join('');
   document.getElementById('cards').innerHTML=cards;
   const rows=(arr,cls)=> (arr||[]).map(([r,i])=>
@@ -288,16 +286,13 @@ function render(d){
       <div class="row"><span>Ítems cruzados</span><b>${d.cruces}</b></div>
       <div class="row"><span>Más barato que IPC</span><b>${d.mas_barato_que_ipc}</b></div>
       <div class="row"><span>Más caro que IPC</span><b>${d.mas_caro_que_ipc}</b></div>
-      <div class="row"><span>Ahorro potencial</span><b>${cop(d.ahorro_potencial)}</b></div>
-      <div class="row"><span>Diferencia neta</span><b>${cop(d.diferencia_neta)}</b></div>
     </div>`}).join('');
   // conclusiones: vienen del backend si las exponemos; si no, derivamos básicas.
   const cs=(d.stats&&d.stats._conclusiones)||[];
   document.getElementById('concl').innerHTML =
     (cs.length?cs:[
       `Se analizaron ${s.fuentes_analizadas??0} fuentes en ${(s.regiones_analizadas||[]).length} regiones.`,
-      `${s.items_mercado_mas_barato_que_ipc??0} ítems se consiguen más baratos que aplicando solo IPC; ${s.items_mercado_mas_caro_que_ipc??0} están por encima.`,
-      `Ahorro potencial: ${cop(s.ahorro_potencial_total)} · Diferencia neta: ${cop(s.diferencia_neta_total)}.`
+      `${s.items_mercado_mas_barato_que_ipc??0} ítems se consiguen más baratos que aplicando solo IPC; ${s.items_mercado_mas_caro_que_ipc??0} están por encima.`
     ]).map(t=>`<li>${t}</li>`).join('');
   document.getElementById('results').style.display='block';
 }
