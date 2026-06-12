@@ -98,6 +98,28 @@ class WarehouseSheet:
                 return i + 1
         return None
 
+    @staticmethod
+    def _letter_to_index(letter: str) -> int:
+        """Convierte una letra de columna ('O', 'AA') a índice 1-based."""
+        letter = letter.strip().upper()
+        idx = 0
+        for ch in letter:
+            idx = idx * 26 + (ord(ch) - ord("A") + 1)
+        return idx
+
+    def batch_update_by_letter(self, col_letter: str, updates: dict[int, object]) -> int:
+        """Actualiza una columna identificada por LETRA (p.ej. 'O', 'P') en filas
+        específicas. Útil cuando el encabezado es ambiguo o duplicado."""
+        col_idx = self._letter_to_index(col_letter)
+        cells = []
+        for row, value in updates.items():
+            if value is None:
+                continue
+            cells.append(gspread.Cell(row=row, col=col_idx, value=value))
+        if cells:
+            self._ws.update_cells(cells, value_input_option="USER_ENTERED")
+        return len(cells)
+
     def batch_update_column(self, column_name: str, updates: dict[int, float]) -> int:
         """Actualiza una columna en filas específicas.
 

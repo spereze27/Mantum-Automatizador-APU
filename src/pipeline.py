@@ -278,7 +278,9 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
 
     records = []
     consolidado_por_planta = []  # filas insumo x planta para el reporte
-    updates: dict[int, float] = {}
+    updates_price: dict[int, float] = {}
+    updates_year: dict[int, int] = {}
+    anio_actual = int(settings.update_year) if str(settings.update_year).strip() else dt.date.today().year
     for _, row in insumos.iterrows():
         desc = str(row.get(C_DESC, "")).strip()
         und = str(row.get(C_UND, "")).strip()
@@ -465,12 +467,17 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             ipc_factor = (1 + settings.ipc_variation) if settings.apply_ipc_to_warehouse else 1.0
             nuevo_valor = round(precio_ref * ipc_factor, 2)
             actualizado = True
-            updates[int(row["_sheet_row"])] = nuevo_valor
         else:
-            nuevo_valor = valor_wh_ipc
+            # Sin fuente que refute: se conserva el precio que ya tenía PRIMARIOS
+            # (el valor actual de la columna 'Precio de Lista'), sin proyectar.
+            nuevo_valor = round(valor_wh, 2)
             actualizado = False
-            if settings.apply_ipc_to_warehouse:
-                updates[int(row["_sheet_row"])] = nuevo_valor
+
+        # Se escribe SIEMPRE (haya o no fuente): columna O = precio actualizado,
+        # columna P = año actual. Así todo insumo evaluado queda sellado al año.
+        if valor_wh and valor_wh > 0:
+            updates_price[int(row["_sheet_row"])] = nuevo_valor
+            updates_year[int(row["_sheet_row"])] = anio_actual
 
         records.append({
             "codigo": row.get(C_COD, ""),
@@ -521,10 +528,12 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
     result.cruces_validos = int(matches["actualizado"].sum()) if not matches.empty else 0
     consolidado_planta_df = pd.DataFrame(consolidado_por_planta)
 
-    # --- 5. Actualizar el Sheet ---
-    if updates and not settings.dry_run:
+    # --- 5. Actualizar el Sheet: columna O (precio) y columna P (año) ---
+    if updates_price and not settings.dry_run:
         try:
-            result.celdas_actualizadas = sheet.batch_update_column(C_PRECIO, updates)
+            n_precio = sheet.batch_update_by_letter(settings.write_price_col, updates_price)
+            sheet.batch_update_by_letter(settings.write_year_col, updates_year)
+            result.celdas_actualizadas = n_precio
         except Exception as exc:
             result.errors.append(f"Error actualizando Sheet: {exc}")
     elif settings.dry_run:

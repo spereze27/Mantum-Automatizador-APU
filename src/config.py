@@ -44,6 +44,11 @@ class Settings:
     max_price_ratio: float = field(
         default_factory=lambda: float(os.getenv("MAX_PRICE_RATIO", "8"))
     )
+    # Escritura en el Sheet: columna O = precio actualizado, columna P = año.
+    # (No se escribe 'Precio de Lista' porque es una fórmula.)
+    write_price_col: str = field(default_factory=lambda: os.getenv("WRITE_PRICE_COL", "O"))
+    write_year_col: str = field(default_factory=lambda: os.getenv("WRITE_YEAR_COL", "P"))
+    update_year: str = field(default_factory=lambda: os.getenv("UPDATE_YEAR", ""))
 
     # --- Google Sheets (warehouse) ---
     warehouse_sheet_url: str = field(default_factory=lambda: os.getenv("WAREHOUSE_SHEET_URL", ""))
