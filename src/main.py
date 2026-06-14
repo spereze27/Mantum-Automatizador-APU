@@ -58,6 +58,21 @@ async def run(request: Request):
         body = {}
     if isinstance(body, dict) and "dry_run" in body:
         os.environ["DRY_RUN"] = "true" if body["dry_run"] else "false"
+    if isinstance(body, dict):
+        # Overrides puntuales desde la UI: modo (actual/siguiente) e índices manuales.
+        if body.get("modo") in ("actual", "siguiente"):
+            os.environ["UPDATE_MODE"] = body["modo"]
+        if body.get("ipc") not in (None, ""):
+            try:
+                os.environ["IPC_VARIATION"] = str(float(body["ipc"]))
+            except Exception:
+                pass
+        if body.get("smlv") not in (None, ""):
+            try:
+                os.environ["SMLV_INCREASE"] = str(float(body["smlv"]))
+            except Exception:
+                pass
+    if isinstance(body, dict) and ("dry_run" in body or "modo" in body or "ipc" in body or "smlv" in body):
         get_settings.cache_clear()
         settings = get_settings()
     try:
@@ -195,6 +210,16 @@ _INDEX_HTML = r"""<!DOCTYPE html>
     </div>
     <div class="controls">
       <label class="toggle"><input type="checkbox" id="dry"/> Modo auditoría (no escribe el Sheet)</label>
+      <label class="toggle">Actualizar:
+        <select id="modo" onchange="document.getElementById('proj').style.display=this.value==='siguiente'?'inline-flex':'none'">
+          <option value="actual">Año actual (sin proyectar)</option>
+          <option value="siguiente">Año siguiente (proyectar)</option>
+        </select>
+      </label>
+      <span id="proj" style="display:none;gap:8px;align-items:center">
+        <label class="toggle">IPC % (material): <input type="number" id="ipc" step="0.01" value="5.28" style="width:80px"/></label>
+        <label class="toggle">Salario mínimo % (mano de obra): <input type="number" id="smlv" step="0.01" value="9.50" style="width:80px"/></label>
+      </span>
       <button class="btn" id="go" onclick="run()">⚙️ Generar actualización y análisis</button>
     </div>
   </div>
@@ -247,10 +272,13 @@ async function run(){
   const btn=document.getElementById('go'); btn.disabled=true;
   document.getElementById('results').style.display='none';
   const dry=document.getElementById('dry').checked;
-  setStatus('Analizando fuentes, cruzando ítems y aplicando IPC… (puede tardar 1–3 min)');
+  const modo=document.getElementById('modo').value;
+  const ipc=parseFloat(document.getElementById('ipc').value||'0')/100;
+  const smlv=parseFloat(document.getElementById('smlv').value||'0')/100;
+  setStatus('Analizando fuentes, cruzando ítems y proyectando precios… (puede tardar 1–3 min)');
   try{
     const r=await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({dry_run:dry})});
+      body:JSON.stringify({dry_run:dry, modo:modo, ipc:ipc, smlv:smlv})});
     const d=await r.json();
     render(d);
     setStatus('✅ Listo. '+(d.dry_run?'(modo auditoría: no se escribió el Sheet)':'Warehouse actualizado.'),false,false);

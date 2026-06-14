@@ -49,6 +49,11 @@ class Settings:
     write_price_col: str = field(default_factory=lambda: os.getenv("WRITE_PRICE_COL", "O"))
     write_year_col: str = field(default_factory=lambda: os.getenv("WRITE_YEAR_COL", "P"))
     update_year: str = field(default_factory=lambda: os.getenv("UPDATE_YEAR", ""))
+    # Modo de actualización: 'actual' (compara/escribe al año actual, sin proyectar)
+    # o 'siguiente' (proyecta al año entrante con IPC para material e incremento
+    # del salario mínimo para mano de obra; ambos se ingresan manualmente en la UI).
+    update_mode: str = field(default_factory=lambda: os.getenv("UPDATE_MODE", "actual"))
+    smlv_increase: float = field(default_factory=lambda: float(os.getenv("SMLV_INCREASE", "0.0")))
 
     # --- Google Sheets (warehouse) ---
     warehouse_sheet_url: str = field(default_factory=lambda: os.getenv("WAREHOUSE_SHEET_URL", ""))

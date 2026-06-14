@@ -204,7 +204,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
 
     # Unifica ambas fuentes en un solo catálogo tidy (mismo esquema).
     base_cols = ["region", "proveedor", "descripcion", "unidad", "precio",
-                 "archivo", "formato", "fuente_tipo", "gcs_path", "columna_precio"]
+                 "archivo", "formato", "fuente_tipo", "gcs_path", "columna_precio", "cantidad"]
     parts = []
     for d in (comparativos, consolidado):
         if d is not None and not d.empty:
@@ -280,12 +280,22 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
     consolidado_por_planta = []  # filas insumo x planta para el reporte
     updates_price: dict[int, float] = {}
     updates_year: dict[int, int] = {}
-    anio_actual = int(settings.update_year) if str(settings.update_year).strip() else dt.date.today().year
+    base_year = int(settings.update_year) if str(settings.update_year).strip() else dt.date.today().year
+    siguiente = str(settings.update_mode).strip().lower() == "siguiente"
+    anio_objetivo = base_year + 1 if siguiente else base_year
     for _, row in insumos.iterrows():
         desc = str(row.get(C_DESC, "")).strip()
         und = str(row.get(C_UND, "")).strip()
+        categoria = _categoria(row.get(C_GRUPO, ""))
         valor_wh = row["_valor"]
-        valor_wh_ipc = apply_ipc(valor_wh, settings.ipc_variation, settings.apply_ipc_to_warehouse)
+        # Factor de proyección: al año actual = 1 (sin proyectar); al año siguiente,
+        # material/viáticos usan IPC y mano de obra el incremento del salario mínimo.
+        if siguiente:
+            factor_proj = (1 + settings.smlv_increase) if categoria == "Mano de obra" else (1 + settings.ipc_variation)
+        else:
+            factor_proj = 1.0
+        valor_wh_proj = round(valor_wh * factor_proj, 2)
+        valor_wh_ipc = valor_wh_proj  # alias para guardia de magnitud y diferencias
 
         m = matcher.match(desc, und)
         metodo = m.method
@@ -324,6 +334,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         precio_cons_prom = precio_cons_med = precio_cons_min = precio_cons_max = n_cons = None
         link_cons = arch_cons = None
         todas_las_fuentes = None
+        cantidad_consumo = None
 
         if matched and not comp.empty:
             grp = comp[comp["item_norm"].isin(match_norms)].copy()
@@ -385,6 +396,11 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 precio_cons_max = round(float(con["precio"].max()), 2)
                 n_cons = int(len(con))
                 arch_cons = con.iloc[0].get("archivo", "")
+                # Consumo total real (suma de Cantidad de las facturas del Consolidado).
+                if "cantidad" in con.columns:
+                    qsum = pd.to_numeric(con["cantidad"], errors="coerce").dropna()
+                    if not qsum.empty and float(qsum.sum()) > 0:
+                        cantidad_consumo = round(float(qsum.sum()), 2)
                 link_cons = _gcs_link(con.iloc[0].get("gcs_path", ""))
                 for reg, sub in con.groupby("region"):
                     consolidado_por_planta.append({
@@ -451,41 +467,45 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 fuente_ref = tipo_ref = link_ref = None
 
         diferencia_vs_ipc = pct_diferencia = por_encima_ipc = None
-        if precio_ref is not None and valor_wh_ipc:
-            diferencia_vs_ipc = round(valor_wh_ipc - precio_ref, 2)  # + = ahorro
-            pct_diferencia = round((diferencia_vs_ipc / valor_wh_ipc) * 100, 1)
-            por_encima_ipc = precio_ref > valor_wh_ipc
+        ahorro_ponderado = None
+        qty = cantidad_consumo if (cantidad_consumo and cantidad_consumo > 0) else 1.0
+        if precio_ref is not None and valor_wh_proj:
+            ref_proj = round(precio_ref * factor_proj, 2)
+            diferencia_vs_ipc = round(valor_wh_proj - ref_proj, 2)  # + = ahorro por unidad
+            pct_diferencia = round((diferencia_vs_ipc / valor_wh_proj) * 100, 1)
+            por_encima_ipc = ref_proj > valor_wh_proj
+            # Ahorro/sobrecosto ponderado por el consumo anual real.
+            ahorro_ponderado = round(diferencia_vs_ipc * qty, 2)
 
         if precio_ref is not None:
-            # (5) El valor de actualización proyecta el precio de referencia por
-            # el IPC (no se escribe el valor de mercado tal cual).
-            ipc_factor = (1 + settings.ipc_variation) if settings.apply_ipc_to_warehouse else 1.0
-            nuevo_valor = round(precio_ref * ipc_factor, 2)
+            # Valor a escribir: precio de referencia proyectado al año objetivo
+            # (IPC para material/viáticos, salario mínimo para mano de obra).
+            nuevo_valor = round(precio_ref * factor_proj, 2)
             actualizado = True
         else:
-            # Sin fuente que refute: se conserva el precio que ya tenía PRIMARIOS
-            # (el valor actual de la columna 'Precio de Lista'), sin proyectar.
-            nuevo_valor = round(valor_wh, 2)
+            # Sin fuente que refute: se conserva el precio de PRIMARIOS, proyectado
+            # con el mismo factor (al año actual el factor es 1, queda igual).
+            nuevo_valor = round(valor_wh * factor_proj, 2)
             actualizado = False
 
-        # Se escribe SIEMPRE (haya o no fuente): columna O = precio actualizado,
-        # columna P = año actual. Así todo insumo evaluado queda sellado al año.
+        # Se escribe SIEMPRE: columna O = precio actualizado, columna P = año objetivo.
         if valor_wh and valor_wh > 0:
             updates_price[int(row["_sheet_row"])] = nuevo_valor
-            updates_year[int(row["_sheet_row"])] = anio_actual
+            updates_year[int(row["_sheet_row"])] = anio_objetivo
 
         records.append({
             "codigo": row.get(C_COD, ""),
             "descripcion_wh": desc,
             "und_wh": und,
             "grupo": row.get(C_GRUPO, ""),
-            "categoria": _categoria(row.get(C_GRUPO, "")),
+            "categoria": categoria,
             "candidato": candidato,
             "score": round(score, 2),
             "metodo": metodo,
             "unidad_coincide": m.unit_match,
             "valor_wh": round(valor_wh, 2),
-            "valor_wh_ipc": valor_wh_ipc,
+            "valor_wh_proyectado": valor_wh_proj,
+            "factor_proyeccion": round(factor_proj, 4),
             # Cotizaciones (comparativos)
             "precio_comparativo_promedio": precio_comp_prom,
             "precio_comparativo_min": precio_comp_min,
@@ -504,6 +524,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             "precio_consolidado_min": precio_cons_min,
             "precio_consolidado_max": precio_cons_max,
             "n_facturas_consolidado": n_cons,
+            "consumo_anual": cantidad_consumo,
             # Referencia (promedio ponderado) / refutación
             "precio_referencia": precio_ref,
             "como_se_calculo": tipo_ref,
@@ -514,6 +535,9 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             "pct_diferencia": pct_diferencia,
             "warehouse_por_debajo_del_mercado": por_encima_ipc,
             "descartado_por_magnitud": descartado_magnitud,
+            "consumo_usado": qty,
+            "ahorro_ponderado": ahorro_ponderado,
+            "anio_actualizado": anio_objetivo,
             "nuevo_valor": nuevo_valor,
             "actualizado": actualizado,
             "_sheet_row": int(row["_sheet_row"]),

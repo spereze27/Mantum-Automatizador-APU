@@ -75,12 +75,29 @@ def parse_consolidado(content: bytes, filename: str) -> pd.DataFrame:
     c_fact = col("# Factura", "Factura")
     c_tipocosto = col("Tipo de Costo")
     c_unidad = col("Unidad", "Und")
+    c_cant = col("Cantidad", "Cant.", "Cant")
     if c_desc is None or c_precio is None:
         return pd.DataFrame()
+
+    def _to_qty(x):
+        """Cantidad/consumo: coma decimal, punto de miles. No tiene piso (1, 2 válidos)."""
+        s = str(x).strip().replace(" ", "")
+        if not s or s.lower() == "nan":
+            return None
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".")
+        elif "," in s:
+            s = s.replace(",", ".")
+        try:
+            v = float(s)
+            return v if v > 0 else None
+        except Exception:
+            return None
 
     out = pd.DataFrame()
     out["descripcion"] = df[c_desc].astype(str).str.strip()
     out["precio"] = df[c_precio].map(to_number)
+    out["cantidad"] = df[c_cant].map(_to_qty) if c_cant else None
     out["proveedor"] = df[c_prov].astype(str).str.strip() if c_prov else ""
     out["sede"] = df[c_sede].astype(str).str.strip() if c_sede else ""
     out["region"] = out["sede"].map(lambda s: sede_region.get(_slug(s), "Sin región"))

@@ -20,7 +20,7 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
     cols = [
         "codigo", "descripcion_wh", "und_wh", "grupo", "categoria",
         "candidato", "score", "metodo", "unidad_coincide",
-        "valor_wh", "valor_wh_ipc",
+        "valor_wh", "valor_wh_proyectado", "factor_proyeccion",
         "precio_comparativo_promedio", "precio_comparativo_min",
         "precio_comparativo_mediana", "precio_comparativo_max", "n_cotizaciones",
         "region_mejor_comparativo", "proveedor_comparativo",
@@ -28,10 +28,12 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
         "todas_las_fuentes",
         "precio_consolidado_promedio", "precio_consolidado_mediana",
         "precio_consolidado_min", "precio_consolidado_max", "n_facturas_consolidado",
+        "consumo_anual",
         "precio_referencia", "como_se_calculo", "de_donde_salio_el_precio",
         "fuente_que_refuta", "enlace_fuente",
         "diferencia_vs_ipc", "pct_diferencia", "warehouse_por_debajo_del_mercado",
         "descartado_por_magnitud",
+        "consumo_usado", "ahorro_ponderado", "anio_actualizado",
         "nuevo_valor", "actualizado",
     ]
     existing = [c for c in cols if c in matches.columns]
@@ -215,8 +217,30 @@ def build_excel_report(
         )
         if not regional_pivot_df.empty:
             regional_pivot_df.to_excel(writer, sheet_name="Pivot Regional", index=False)
+        _format_sheets(writer)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def _format_sheets(writer) -> None:
+    """Ajusta el ancho de cada columna para que el título completo sea visible,
+    congela la fila de encabezado y activa el autofiltro."""
+    from openpyxl.utils import get_column_letter
+    for ws in writer.book.worksheets:
+        max_row = ws.max_row
+        for col_idx in range(1, ws.max_column + 1):
+            letter = get_column_letter(col_idx)
+            header = ws.cell(row=1, column=col_idx).value
+            best = len(str(header)) if header is not None else 10
+            # Muestra hasta 80 filas para estimar el ancho del contenido.
+            for r in range(2, min(max_row, 80) + 1):
+                v = ws.cell(row=r, column=col_idx).value
+                if v is not None:
+                    best = max(best, len(str(v)))
+            ws.column_dimensions[letter].width = min(max(best + 2, 12), 60)
+        if max_row >= 1 and ws.max_column >= 1:
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{max_row}"
 
 
 # ---------------------------------------------------------------------------
@@ -279,14 +303,19 @@ def compute_stats(matches: pd.DataFrame, comparativos: pd.DataFrame) -> dict:
         m = matches[matches["actualizado"] == True].copy()  # noqa: E712
         m = m[m["diferencia_vs_ipc"].notna()]
         s["cruces_validos"] = int(len(m))
+        # Columna de ahorro: ponderada por consumo si existe; si no, por unidad.
+        val_col = "ahorro_ponderado" if "ahorro_ponderado" in m.columns else "diferencia_vs_ipc"
+        m[val_col] = pd.to_numeric(m[val_col], errors="coerce")
+        m = m[m[val_col].notna()]
         # mercado por DEBAJO del IPC = se consigue más barato (diferencia > 0).
-        below = m[m["diferencia_vs_ipc"] > 0]
-        above = m[m["diferencia_vs_ipc"] < 0]
+        below = m[m[val_col] > 0]
+        above = m[m[val_col] < 0]
         s["items_mercado_mas_barato_que_ipc"] = int(len(below))
         s["items_mercado_mas_caro_que_ipc"] = int(len(above))
-        s["ahorro_potencial_total"] = round(float(below["diferencia_vs_ipc"].sum()), 0)
-        s["sobrecosto_potencial_total"] = round(float(-above["diferencia_vs_ipc"].sum()) + 0.0, 0)
-        s["diferencia_neta_total"] = round(float(m["diferencia_vs_ipc"].sum()), 0)
+        s["ahorro_potencial_total"] = round(float(below[val_col].sum()), 0)
+        s["sobrecosto_potencial_total"] = round(float(-above[val_col].sum()) + 0.0, 0)
+        s["diferencia_neta_total"] = round(float(m[val_col].sum()), 0)
+        s["ahorro_ponderado_por_consumo"] = bool(val_col == "ahorro_ponderado")
 
         # Segmentación por categoría: Material | Mano de obra | Viáticos.
         por_cat = {}
@@ -294,15 +323,15 @@ def compute_stats(matches: pd.DataFrame, comparativos: pd.DataFrame) -> dict:
         cats = ["Material", "Mano de obra", "Viáticos"]
         for cat in cats:
             sub = m[m[cat_col] == cat] if cat_col else m.iloc[0:0]
-            below_c = sub[sub["diferencia_vs_ipc"] > 0]
-            above_c = sub[sub["diferencia_vs_ipc"] < 0]
+            below_c = sub[sub[val_col] > 0]
+            above_c = sub[sub[val_col] < 0]
             por_cat[cat] = {
                 "cruces": int(len(sub)),
                 "mas_barato_que_ipc": int(len(below_c)),
                 "mas_caro_que_ipc": int(len(above_c)),
-                "ahorro_potencial": round(float(below_c["diferencia_vs_ipc"].sum()), 0),
-                "sobrecosto_potencial": round(float(-above_c["diferencia_vs_ipc"].sum()) + 0.0, 0),
-                "diferencia_neta": round(float(sub["diferencia_vs_ipc"].sum()), 0),
+                "ahorro_potencial": round(float(below_c[val_col].sum()), 0),
+                "sobrecosto_potencial": round(float(-above_c[val_col].sum()) + 0.0, 0),
+                "diferencia_neta": round(float(sub[val_col].sum()), 0),
             }
         s["por_categoria"] = por_cat
     else:
