@@ -319,14 +319,15 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 metodo = "gemini"
 
         matched = cand_norm is not None
-        # Conjunto de variantes del catálogo que cruzan con este insumo (no solo
-        # la idéntica): así se juntan el mismo insumo descrito distinto en cada
-        # fuente (comparativo y consolidado).
+        # Conjunto de variantes del catálogo que se AGREGAN (promedio/consumo).
+        # Solo variantes con score alto (agg_min_score), para no sobre-agrupar
+        # términos genéricos como 'Oficial' que juntarían cientos de líneas distintas.
         match_norms = set()
         if matched:
-            match_norms.add(cand_norm)
-            for v in matcher.match_many(desc, und, limit=15):
+            for v in matcher.match_many(desc, und, limit=15, min_score=settings.agg_min_score):
                 match_norms.add(v["norm"])
+            if score >= settings.agg_min_score:
+                match_norms.add(cand_norm)
         # --- Agregación separada por fuente (se usa PROMEDIO) ---
         precio_comp_prom = precio_comp_min = precio_comp_med = precio_comp_max = n_comp = None
         region_comp = prov_comp = link_comp = arch_comp = col_comp = None
@@ -451,18 +452,39 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             fuente_ref = tipo_ref = link_ref = region_ref = prov_ref = None
             de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
+        # Regla de acuerdo entre fuentes: si el comparativo y el consolidado
+        # divergen mucho, se descarta el comparativo y se usa el gasto real.
+        if precio_ref is not None and precio_comp_prom and precio_cons_prom:
+            rdis = max(precio_comp_prom, precio_cons_prom) / min(precio_comp_prom, precio_cons_prom)
+            if rdis > settings.source_disagree_ratio:
+                precio_ref = precio_cons_prom
+                tipo_ref = "Gasto real (Consolidado) - comparativo descartado por divergencia"
+                fuente_ref = arch_cons
+                link_ref = link_cons
+                de_donde = (f"Gasto real {_cop(precio_cons_prom)} ({n_cons} facturas). "
+                            f"Comparativo {_cop(precio_comp_prom)} descartado: difería {rdis:.1f}x.")
+
         # Guardia de cordura por magnitud: descarta referencias desproporcionadas
         # (p.ej. una tarifa por m2 cruzada contra un 'MANO DE OBRA' global).
         descartado_magnitud = False
-        if precio_ref is not None and valor_wh_ipc:
-            ratio = precio_ref / valor_wh_ipc
+        if precio_ref is not None and valor_wh_proj:
+            ratio = precio_ref / valor_wh_proj
+            extremo = ratio > settings.extreme_ratio or ratio < 1.0 / settings.extreme_ratio
             if ratio > settings.max_price_ratio or ratio < 1.0 / settings.max_price_ratio:
                 descartado_magnitud = True
                 de_donde = (
-                    f"DESCARTADO por magnitud: referencia {_cop(precio_ref)} vs warehouse "
-                    f"{_cop(valor_wh_ipc)} (relación {ratio:.0f}x; probable unidad/alcance distinto). "
-                    f"Candidato dudoso: '{candidato}'."
+                    f"DESCARTADO por magnitud: referencia {_cop(precio_ref)} vs BD "
+                    f"{_cop(valor_wh_proj)} (relación {ratio:.0f}x; probable unidad/alcance distinto)."
                 )
+            elif extremo and score < settings.high_score_for_extreme:
+                # Valor extremo vs la BD pero el match no es lo bastante confiable.
+                descartado_magnitud = True
+                de_donde = (
+                    f"DESCARTADO: referencia {_cop(precio_ref)} se aleja {ratio:.1f}x de la BD "
+                    f"({_cop(valor_wh_proj)}) y el match no es confiable (score {score:.0f} < "
+                    f"{int(settings.high_score_for_extreme)})."
+                )
+            if descartado_magnitud:
                 precio_ref = None
                 fuente_ref = tipo_ref = link_ref = None
 

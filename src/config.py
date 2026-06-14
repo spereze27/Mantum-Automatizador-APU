@@ -42,7 +42,23 @@ class Settings:
     # menor que el valor del warehouse, el cruce se descarta (probable unidad o
     # alcance distinto, p.ej. una tarifa por m2 vs un contrato global).
     max_price_ratio: float = field(
-        default_factory=lambda: float(os.getenv("MAX_PRICE_RATIO", "8"))
+        default_factory=lambda: float(os.getenv("MAX_PRICE_RATIO", "5"))
+    )
+    # Estrictez adicional para evitar sobrecostos inflados:
+    # - agg_min_score: solo se agregan (promedio/consumo) las variantes del
+    #   catálogo cuyo match con el insumo sea >= este score. Evita que un término
+    #   genérico ('Oficial') junte cientos de líneas distintas.
+    # - extreme_ratio + high_score_for_extreme: si la referencia se aleja más de
+    #   'extreme_ratio' del valor de la BD, se exige un score muy alto; si no, se descarta.
+    # - source_disagree_ratio: si el comparativo y el consolidado difieren más de
+    #   este factor, se descarta el comparativo y se usa el gasto real (Consolidado).
+    agg_min_score: float = field(default_factory=lambda: float(os.getenv("AGG_MIN_SCORE", "80")))
+    extreme_ratio: float = field(default_factory=lambda: float(os.getenv("EXTREME_RATIO", "2.0")))
+    high_score_for_extreme: float = field(
+        default_factory=lambda: float(os.getenv("HIGH_SCORE_FOR_EXTREME", "90"))
+    )
+    source_disagree_ratio: float = field(
+        default_factory=lambda: float(os.getenv("SOURCE_DISAGREE_RATIO", "1.8"))
     )
     # Escritura en el Sheet: columna O = precio actualizado, columna P = año.
     # (No se escribe 'Precio de Lista' porque es una fórmula.)
