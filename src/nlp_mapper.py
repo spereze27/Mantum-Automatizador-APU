@@ -181,6 +181,19 @@ class ItemMatcher:
             self._embeddings = None
             print(f"[nlp_mapper] embeddings deshabilitados: {exc}")
 
+    @staticmethod
+    def _is_generic_candidate(query_norm: str, cand_norm: str) -> bool:
+        """True si el candidato es un subconjunto GENÉRICO del insumo: sus tokens
+        significativos (>=3 chars) están todos en el insumo, pero al insumo le
+        sobran tokens distintivos. Ej.: insumo 'oficial carpintero' vs candidato
+        'oficial' -> genérico (no debe cruzar). Evita el doble conteo de roles."""
+        def toks(s):
+            return {t for t in str(s).split() if len(t) >= 3}
+        q, c = toks(query_norm), toks(cand_norm)
+        if not q or not c:
+            return False
+        return c < q  # subconjunto propio: candidato más genérico que el insumo
+
     def match_many(self, description: str, unit: str = "", limit: int = 15,
                    min_score: float = None) -> list[dict]:
         """Devuelve TODAS las variantes del catálogo que cruzan con el insumo por
@@ -200,6 +213,8 @@ class ItemMatcher:
         for cand_norm, score in scored:
             if score < thr:
                 continue
+            if self._is_generic_candidate(norm, cand_norm):
+                continue  # candidato demasiado genérico (le faltan tokens del insumo)
             idx = self._norm.index(cand_norm)
             out.append({
                 "norm": cand_norm,
@@ -225,7 +240,7 @@ class ItemMatcher:
         if best:
             cand_norm, score = best[0], float(best[1])
             idx = self._norm.index(cand_norm)
-            if score >= self.fuzzy_threshold:
+            if score >= self.fuzzy_threshold and not self._is_generic_candidate(norm, cand_norm):
                 return MatchResult(
                     matched=True,
                     candidate_raw=self._raw[idx],
