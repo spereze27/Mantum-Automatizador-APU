@@ -26,11 +26,15 @@ app = FastAPI(title="Mantum Automatizador APU", version="2.0.0")
 
 
 def _json_safe(o):
-    """Convierte recursivamente a tipos nativos seguros para JSON: tipos de
-    numpy (np.float64/np.int64/np.bool_) a Python, y NaN/Inf a None. Evita el
-    error 'JSON.parse: unexpected character' cuando hay valores no serializables."""
+    """Convierte recursivamente a tipos nativos seguros para JSON: numpy a Python,
+    NaN/Inf a None, set a lista, y CUALQUIER otro tipo no primitivo (fechas,
+    Timestamp, Decimal, etc.) a texto. Evita el error 'JSON.parse: unexpected
+    character' por valores no serializables."""
+    if o is None or isinstance(o, (str, int, bool)):
+        return o
     if isinstance(o, dict):
-        return {k: _json_safe(v) for k, v in o.items()}
+        return {(_k if isinstance(_k, (str, int, float, bool)) or _k is None else str(_k)): _json_safe(v)
+                for _k, v in o.items()}
     if isinstance(o, (list, tuple, set, frozenset)):
         return [_json_safe(v) for v in o]
     if hasattr(o, "item") and not isinstance(o, (str, bytes)):
@@ -38,9 +42,11 @@ def _json_safe(o):
             o = o.item()  # numpy scalar -> python
         except Exception:
             pass
-    if isinstance(o, float) and (math.isnan(o) or math.isinf(o)):
-        return None
-    return o
+    if isinstance(o, float):
+        return None if (math.isnan(o) or math.isinf(o)) else o
+    if isinstance(o, (str, int, bool)) or o is None:
+        return o
+    return str(o)  # fechas, Timestamp, Decimal y demás -> texto
 
 
 @app.get("/health")
@@ -89,7 +95,14 @@ async def run(request: Request):
             "insumos_evaluados": None, "celdas_actualizadas": None,
         })
     status_code = 200 if not result.errors else 207
-    return JSONResponse(status_code=status_code, content=_json_safe(asdict(result)))
+    try:
+        return JSONResponse(status_code=status_code, content=_json_safe(asdict(result)))
+    except Exception as exc:
+        # Último recurso: nunca devolver HTML 500 al navegador.
+        return JSONResponse(status_code=200, content={
+            "errors": [f"Error serializando la respuesta: {exc}"],
+            "celdas_actualizadas": 0,
+        })
 
 
 @app.get("/report/latest")
