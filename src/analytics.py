@@ -1,6 +1,7 @@
 """Analítica del comparativo: mapeo 1 a 1, outliers y comparativo regional."""
 from __future__ import annotations
 
+import re
 import io
 from typing import Optional
 
@@ -8,6 +9,16 @@ import numpy as np
 import pandas as pd
 
 from .nlp_mapper import normalize
+
+
+def _cop(x) -> str:
+    """Formatea un número como pesos colombianos: 19800 -> '$19.800'."""
+    try:
+        if x is None:
+            return "—"
+        return "$" + f"{float(x):,.0f}".replace(",", ".")
+    except Exception:
+        return str(x)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +195,143 @@ def _categoria_frame(stats: dict) -> pd.DataFrame:
     return pd.DataFrame(filas)
 
 
+def _parse_fuentes(texto: str):
+    """Extrae (etiqueta, precio) de la cadena todas_las_fuentes."""
+    out = []
+    if not texto or not isinstance(texto, str):
+        return out
+    for part in texto.split(" ; "):
+        part = part.strip()
+        if not part or part.startswith("(+"):
+            continue
+        if "$" in part:
+            etiqueta, _, pr = part.rpartition("$")
+            etiqueta = etiqueta.rstrip(": ").strip()
+            num = re.sub(r"[^\d]", "", pr.split(",")[0])
+            try:
+                precio = float(num) if num else None
+            except Exception:
+                precio = None
+            out.append((etiqueta or pr, precio))
+    return out
+
+
+def build_items_revisar_sheet(writer, mapping: pd.DataFrame, top_impacto: int = 15):
+    """Crea la hoja 'Items a Revisar' con formato legible: un bloque por ítem con
+    el valor de la BD, mínimo y máximo, y la lista de registros (extremos
+    subrayados). Incluye ítems con (a) registros muy dispersos entre sí, (b) todos
+    los valores muy distintos a la BD, y (c) mayor impacto en ahorro/sobrecosto."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    book = writer.book
+    ws = book.create_sheet("Items a Revisar")
+    ws.sheet_properties.tabColor = "E8742C"
+
+    NARANJA = "E8742C"; GRIS = "F2F2F2"; ROJO = "C0392B"; VERDE_OSC = "1E6B3A"
+    titulo_f = Font(name="Calibri", size=14, bold=True, color="FFFFFF")
+    item_f = Font(name="Calibri", size=12, bold=True, color="FFFFFF")
+    razon_f = Font(name="Calibri", size=10, italic=True, color="FFF2E6")
+    lbl_f = Font(name="Calibri", size=10, bold=True, color="333333")
+    val_f = Font(name="Calibri", size=10, color="333333")
+    rec_f = Font(name="Calibri", size=10, color="444444")
+    ext_f = Font(name="Calibri", size=10, bold=True, underline="single", color=ROJO)
+    naranja_fill = PatternFill("solid", fgColor=NARANJA)
+    gris_fill = PatternFill("solid", fgColor=GRIS)
+
+    ws.column_dimensions["A"].width = 4
+    ws.column_dimensions["B"].width = 70
+    ws.column_dimensions["C"].width = 22
+    ws.column_dimensions["D"].width = 22
+
+    ws.merge_cells("A1:D1")
+    t = ws["A1"]; t.value = "ITEMS A REVISAR — valores dispersos o muy distintos a la BD"
+    t.font = titulo_f; t.fill = naranja_fill; t.alignment = Alignment("left", "center")
+    ws.row_dimensions[1].height = 26
+    r = 3
+
+    if mapping is None or mapping.empty:
+        ws.cell(r, 2, "Sin ítems para revisar.").font = val_f
+        return
+
+    base_col = "valor_wh_proyectado" if "valor_wh_proyectado" in mapping.columns else "valor_wh"
+    df = mapping.copy()
+    df["_bd"] = pd.to_numeric(df.get(base_col), errors="coerce")
+    df["_ap"] = pd.to_numeric(df.get("ahorro_ponderado"), errors="coerce").fillna(0)
+
+    seleccion = []  # (orden, item_row, razon, registros, vmin, vmax)
+    impacto_idx = set(df.reindex(df["_ap"].abs().sort_values(ascending=False).index).head(top_impacto).index)
+
+    for idx, row in df.iterrows():
+        recs = _parse_fuentes(row.get("todas_las_fuentes"))
+        precios = [p for _, p in recs if p and p > 0]
+        bd = row["_bd"]
+        if len(precios) < 1:
+            continue
+        vmin, vmax = min(precios), max(precios)
+        disp = (vmax / vmin) if vmin > 0 else 1
+        razon = None; orden = 3
+        # (a) registros muy diferentes entre sí
+        if disp >= 3 and len(precios) >= 2:
+            razon = "Tiene registros con valores muy diferentes entre sí."; orden = 0
+        # (b) todos los valores notablemente distintos a la BD
+        elif bd and bd > 0 and (min(vmin, vmax) > bd * 1.5 or max(vmin, vmax) < bd * 0.5):
+            razon = "Todos los registros difieren notablemente del valor de la BD."; orden = 1
+        # (c) alto impacto
+        elif idx in impacto_idx and abs(row["_ap"]) > 0:
+            tipo = "ahorro" if row["_ap"] > 0 else "sobrecosto"
+            razon = f"Alto impacto en {tipo} potencial ({_cop(abs(row['_ap']))})."; orden = 2
+        if razon is None:
+            continue
+        seleccion.append((orden, abs(row["_ap"]), row, razon, recs, vmin, vmax, bd))
+
+    seleccion.sort(key=lambda x: (x[0], -x[1]))
+    if not seleccion:
+        ws.cell(r, 2, "Sin ítems dispersos ni de alto impacto.").font = val_f
+        return
+
+    thin = Side(style="thin", color="DDDDDD")
+    for _, _, row, razon, recs, vmin, vmax, bd in seleccion:
+        # Encabezado del ítem
+        ws.merge_cells(f"A{r}:D{r}")
+        ce = ws.cell(r, 1, f"  {row.get('descripcion_wh','')}")
+        ce.font = item_f; ce.fill = naranja_fill; ce.alignment = Alignment("left", "center")
+        ws.row_dimensions[r].height = 20
+        r += 1
+        ws.merge_cells(f"A{r}:D{r}")
+        cr = ws.cell(r, 1, f"  {razon}")
+        cr.font = razon_f; cr.fill = naranja_fill
+        r += 1
+        # Valores BD / min / max
+        ws.cell(r, 2, "Valor de la BD (Wh):").font = lbl_f
+        ws.cell(r, 2).alignment = Alignment("right")
+        ws.cell(r, 3, _cop(bd) if bd else "—").font = Font(bold=True, color=VERDE_OSC)
+        r += 1
+        ws.cell(r, 2, "Valor mínimo:").font = lbl_f; ws.cell(r, 2).alignment = Alignment("right")
+        ws.cell(r, 3, _cop(vmin)).font = val_f
+        ws.cell(r, 2).fill = gris_fill; ws.cell(r, 3).fill = gris_fill
+        r += 1
+        ws.cell(r, 2, "Valor máximo:").font = lbl_f; ws.cell(r, 2).alignment = Alignment("right")
+        ws.cell(r, 3, _cop(vmax)).font = val_f
+        r += 1
+        ws.cell(r, 2, "Registros (extremos subrayados en rojo):").font = lbl_f
+        r += 1
+        # Lista de registros, extremos resaltados
+        recs_sorted = sorted([x for x in recs if x[1]], key=lambda x: x[1])
+        for etiqueta, precio in recs_sorted[:40]:
+            es_extremo = precio in (vmin, vmax)
+            ws.cell(r, 2, f"   • {etiqueta}")
+            ws.cell(r, 2).font = ext_f if es_extremo else rec_f
+            ws.cell(r, 3, _cop(precio)).font = ext_f if es_extremo else rec_f
+            for col in (2, 3):
+                ws.cell(r, col).border = Border(bottom=thin)
+            r += 1
+        if len(recs_sorted) > 40:
+            ws.cell(r, 2, f"   (+{len(recs_sorted) - 40} registros más)").font = razon_f
+            ws.cell(r, 2).font = Font(italic=True, color="999999")
+            r += 1
+        r += 1  # separador
+
+
 def build_excel_report(
     mapping: pd.DataFrame,
     outliers: pd.DataFrame,
@@ -216,13 +364,10 @@ def build_excel_report(
         (regional if not regional.empty else pd.DataFrame({"info": ["sin datos"]})).to_excel(
             writer, sheet_name="Comparativo Regional", index=False
         )
-        # Hoja 'Items a Revisar': cruces cuya referencia se aleja mucho de la BD
-        # (posible ítem/alcance distinto). Ordenados por desviación descendente.
-        revisar = _items_a_revisar(mapping)
-        (revisar if not revisar.empty else pd.DataFrame({"info": ["sin ítems divergentes"]})).to_excel(
-            writer, sheet_name="Items a Revisar", index=False
-        )
         _format_sheets(writer)
+        # Hoja 'Items a Revisar' con formato legible (bloques por ítem). Se crea
+        # después de _format_sheets para que su formato manual no se altere.
+        build_items_revisar_sheet(writer, mapping)
     buffer.seek(0)
     return buffer.getvalue()
 

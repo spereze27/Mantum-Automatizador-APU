@@ -352,39 +352,30 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 if not same.empty:
                     grp = same
 
-            # (4) Recorte de inflados: descarta precios desproporcionados dentro
-            # del propio ítem (p.ej. una 'Lija' a 11.000 cuando casi todas ~2.000).
-            if len(grp) >= 4:
-                med = float(grp["precio"].median())
+            # Separación por fuente. El CONSOLIDADO se usa completo (sin recorte):
+            # de ahí sale el consumo real y el valor MÁXIMO (referencia pedida).
+            # El COMPARATIVO sí excluye outliers para su promedio.
+            con = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"].copy()
+            cot_full = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"].copy()
+            cot = cot_full
+            if len(cot_full) >= 4:
+                med = float(cot_full["precio"].median())
                 if med > 0:
-                    grp = grp[(grp["precio"] >= med / 4) & (grp["precio"] <= med * 4)]
+                    cot = cot_full[(cot_full["precio"] >= med / 4) & (cot_full["precio"] <= med * 4)]
 
-            # (3) Prioriza los registros cercanos al precio de la BD: si existe un
-            # subconjunto razonable cerca de la BD, se usa solo ese (los lejanos
-            # suelen ser ítems/alcances distintos). Si NINGUNO está cerca pero
-            # coinciden entre sí (caso real de BD desactualizada, tipo SikaSil),
-            # se respetan todos.
-            if valor_wh_proj and len(grp) >= 2:
-                lo, hi = valor_wh_proj / 1.5, valor_wh_proj * 1.5
-                cerca = grp[(grp["precio"] >= lo) & (grp["precio"] <= hi)]
-                if len(cerca) >= 1 and len(cerca) >= len(grp) / 3:
-                    grp = cerca
-
-            cot = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"]
-            con = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"]
-
-            # (3) Todas las fuentes consultadas para este ítem (ya filtradas). El
-            # promedio, mínimo y máximo se calculan sobre EXACTAMENTE estas fuentes.
+            # (3) Todas las fuentes consultadas para este ítem (consolidado completo
+            # + comparativo). El consumo, mínimo y máximo del consolidado salen de
+            # TODAS sus facturas (no del subconjunto filtrado por precio).
             fuentes = []
-            grp_sorted = grp.sort_values("precio")
-            for _, fr in grp_sorted.head(100).iterrows():
+            grp_sorted = pd.concat([con, cot_full]).sort_values("precio") if (not con.empty or not cot_full.empty) else grp.iloc[0:0]
+            for _, fr in grp_sorted.head(120).iterrows():
                 fuentes.append(
                     f"{fr.get('archivo','')} [{fr.get('region','')}"
                     f"{('/'+str(fr.get('proveedor'))) if fr.get('proveedor') else ''}]: "
                     f"{_cop(fr.get('precio'))}"
                 )
-            if len(grp_sorted) > 100:
-                fuentes.append(f"(+{len(grp_sorted) - 100} fuentes más)")
+            if len(grp_sorted) > 120:
+                fuentes.append(f"(+{len(grp_sorted) - 120} fuentes más)")
             todas_las_fuentes = " ; ".join(fuentes) if fuentes else None
 
             if not cot.empty:
@@ -427,53 +418,40 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                         "precio_real_max": round(float(sub["precio"].max()), 2),
                     })
 
-        # Precio de referencia = PROMEDIO ponderado priorizando el Consolidado.
-        #   ambos      -> w·promedio_consolidado + (1-w)·promedio_comparativo
-        #   solo uno   -> el promedio de esa fuente
-        w = settings.consolidado_weight
-        if precio_cons_prom is not None and precio_comp_prom is not None:
-            precio_ref = round(w * precio_cons_prom + (1 - w) * precio_comp_prom, 2)
-            tipo_ref = f"Promedio ponderado (Consolidado {int(w*100)}% / Cotización {int((1-w)*100)}%)"
-            fuente_ref = arch_cons
-            link_ref = link_cons
-            region_ref = "Varias fuentes"
-            prov_ref = prov_comp
-            de_donde = (
-                f"Consolidado (gasto real, {n_cons} facturas, prom {_cop(precio_cons_prom)}) {int(w*100)}% "
-                f"+ cotización '{arch_comp}' [{region_comp}, col '{col_comp}', prom {_cop(precio_comp_prom)}] {int((1-w)*100)}%"
-            )
-        elif precio_cons_prom is not None:
-            precio_ref = precio_cons_prom
-            tipo_ref = "Gasto real (Consolidado) - promedio"
+        # Precio de referencia:
+        #   - Si hay CONSOLIDADO (gasto real): se usa su valor MÁXIMO. En insumos
+        #     con registros dispersos (p.ej. Transporte: muchos en 20k y algunos
+        #     en 200k cercanos a la BD), el máximo refleja mejor el costo real.
+        #   - Si NO hay consolidado: promedio del comparativo excluyendo outliers.
+        if precio_cons_max is not None:
+            precio_ref = precio_cons_max
+            tipo_ref = "Gasto real (Consolidado) - valor máximo"
             fuente_ref = arch_cons
             link_ref = link_cons
             region_ref = "Varias plantas"
             prov_ref = ""
-            de_donde = f"Consolidado (gasto real): promedio de {n_cons} facturas en {con['region'].nunique() if not con.empty else 0} planta(s)"
+            de_donde = (
+                f"Consolidado (gasto real): VALOR MÁXIMO {_cop(precio_cons_max)} "
+                f"de {n_cons} facturas (prom {_cop(precio_cons_prom)}, mín {_cop(precio_cons_min)})."
+            )
         elif precio_comp_prom is not None:
             precio_ref = precio_comp_prom
-            tipo_ref = "Cotización proveedor - promedio"
+            tipo_ref = "Cotización proveedor - promedio (sin outliers)"
             fuente_ref = arch_comp
             link_ref = link_comp
             region_ref = region_comp
             prov_ref = prov_comp
-            de_donde = f"Cotización '{arch_comp}' [{region_comp}], columna '{col_comp}', promedio de {n_comp} cotización(es)"
+            de_donde = (
+                f"Sin consolidado. Promedio de {n_comp} cotización(es) excluyendo outliers "
+                f"'{arch_comp}' [{region_comp}, col '{col_comp}']."
+            )
         else:
             precio_ref = None
             fuente_ref = tipo_ref = link_ref = region_ref = prov_ref = None
             de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
-        # Regla de acuerdo entre fuentes: si el comparativo y el consolidado
-        # divergen mucho, se descarta el comparativo y se usa el gasto real.
-        if precio_ref is not None and precio_comp_prom and precio_cons_prom:
-            rdis = max(precio_comp_prom, precio_cons_prom) / min(precio_comp_prom, precio_cons_prom)
-            if rdis > settings.source_disagree_ratio:
-                precio_ref = precio_cons_prom
-                tipo_ref = "Gasto real (Consolidado) - comparativo descartado por divergencia"
-                fuente_ref = arch_cons
-                link_ref = link_cons
-                de_donde = (f"Gasto real {_cop(precio_cons_prom)} ({n_cons} facturas). "
-                            f"Comparativo {_cop(precio_comp_prom)} descartado: difería {rdis:.1f}x.")
+        # (La referencia ya usa solo el consolidado cuando existe, así que no hay
+        # mezcla de fuentes que reconciliar.)
 
         # Guardia de cordura por magnitud: descarta referencias desproporcionadas
         # (p.ej. una tarifa por m2 cruzada contra un 'MANO DE OBRA' global).
