@@ -182,6 +182,18 @@ class ItemMatcher:
             print(f"[nlp_mapper] embeddings deshabilitados: {exc}")
 
     @staticmethod
+    def _number_mismatch(query_norm: str, cand_norm: str) -> bool:
+        """True si ambos textos tienen números (códigos/medidas) y NO comparten
+        ninguno. Ej.: 'viniltex 1520' vs 'viniltex 1501' -> son productos
+        distintos aunque el texto se parezca. Blinda el match contra códigos."""
+        import re as _r
+        qn = set(_r.findall(r"\d+", query_norm))
+        cn = set(_r.findall(r"\d+", cand_norm))
+        if not qn or not cn:
+            return False  # si alguno no tiene números, no aplica
+        return qn.isdisjoint(cn)
+
+    @staticmethod
     def _is_generic_candidate(query_norm: str, cand_norm: str) -> bool:
         """True si el candidato es un subconjunto GENÉRICO del insumo: sus tokens
         significativos (>=3 chars) están todos en el insumo, pero al insumo le
@@ -213,8 +225,8 @@ class ItemMatcher:
         for cand_norm, score in scored:
             if score < thr:
                 continue
-            if self._is_generic_candidate(norm, cand_norm):
-                continue  # candidato demasiado genérico (le faltan tokens del insumo)
+            if self._is_generic_candidate(norm, cand_norm) or self._number_mismatch(norm, cand_norm):
+                continue  # candidato genérico o con código/medida distinta
             idx = self._norm.index(cand_norm)
             out.append({
                 "norm": cand_norm,
@@ -240,7 +252,8 @@ class ItemMatcher:
         if best:
             cand_norm, score = best[0], float(best[1])
             idx = self._norm.index(cand_norm)
-            if score >= self.fuzzy_threshold and not self._is_generic_candidate(norm, cand_norm):
+            if (score >= self.fuzzy_threshold and not self._is_generic_candidate(norm, cand_norm)
+                    and not self._number_mismatch(norm, cand_norm)):
                 return MatchResult(
                     matched=True,
                     candidate_raw=self._raw[idx],

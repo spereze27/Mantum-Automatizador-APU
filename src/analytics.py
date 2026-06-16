@@ -215,11 +215,45 @@ def build_excel_report(
         (regional if not regional.empty else pd.DataFrame({"info": ["sin datos"]})).to_excel(
             writer, sheet_name="Comparativo Regional", index=False
         )
-        if not regional_pivot_df.empty:
-            regional_pivot_df.to_excel(writer, sheet_name="Pivot Regional", index=False)
+        # Hoja 'Items a Revisar': cruces cuya referencia se aleja mucho de la BD
+        # (posible ítem/alcance distinto). Ordenados por desviación descendente.
+        revisar = _items_a_revisar(mapping)
+        (revisar if not revisar.empty else pd.DataFrame({"info": ["sin ítems divergentes"]})).to_excel(
+            writer, sheet_name="Items a Revisar", index=False
+        )
         _format_sheets(writer)
     buffer.seek(0)
     return buffer.getvalue()
+
+
+def _items_a_revisar(mapping: pd.DataFrame, umbral: float = 1.5) -> pd.DataFrame:
+    """Selecciona los cruces cuya referencia difiere del valor de la BD por más
+    de `umbral`x (o menos de 1/umbral), para auditoría manual. Ordena por la
+    desviación (los más alejados primero)."""
+    if mapping is None or mapping.empty:
+        return pd.DataFrame()
+    df = mapping.copy()
+    base_col = "valor_wh_proyectado" if "valor_wh_proyectado" in df.columns else "valor_wh"
+    if "precio_referencia" not in df.columns or base_col not in df.columns:
+        return pd.DataFrame()
+    df = df[pd.to_numeric(df["precio_referencia"], errors="coerce").notna()]
+    df = df[pd.to_numeric(df[base_col], errors="coerce") > 0]
+    if df.empty:
+        return pd.DataFrame()
+    ratio = pd.to_numeric(df["precio_referencia"], errors="coerce") / pd.to_numeric(df[base_col], errors="coerce")
+    df = df.assign(relacion_ref_vs_bd=ratio.round(2))
+    df = df[(ratio > umbral) | (ratio < 1.0 / umbral)]
+    if df.empty:
+        return pd.DataFrame()
+    df = df.assign(_dev=(ratio[df.index] - 1.0).abs()).sort_values("_dev", ascending=False)
+    cols = [c for c in [
+        "codigo", "descripcion_wh", "und_wh", "categoria", "score", "candidato",
+        base_col, "precio_referencia", "relacion_ref_vs_bd",
+        "precio_consolidado_promedio", "n_facturas_consolidado",
+        "precio_comparativo_promedio", "precio_comparativo_max", "n_cotizaciones",
+        "como_se_calculo", "de_donde_salio_el_precio", "todas_las_fuentes",
+    ] if c in df.columns]
+    return df[cols].reset_index(drop=True)
 
 
 def _format_sheets(writer) -> None:

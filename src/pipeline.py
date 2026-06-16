@@ -359,6 +359,17 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 if med > 0:
                     grp = grp[(grp["precio"] >= med / 4) & (grp["precio"] <= med * 4)]
 
+            # (3) Prioriza los registros cercanos al precio de la BD: si existe un
+            # subconjunto razonable cerca de la BD, se usa solo ese (los lejanos
+            # suelen ser ítems/alcances distintos). Si NINGUNO está cerca pero
+            # coinciden entre sí (caso real de BD desactualizada, tipo SikaSil),
+            # se respetan todos.
+            if valor_wh_proj and len(grp) >= 2:
+                lo, hi = valor_wh_proj / 1.5, valor_wh_proj * 1.5
+                cerca = grp[(grp["precio"] >= lo) & (grp["precio"] <= hi)]
+                if len(cerca) >= 1 and len(cerca) >= len(grp) / 3:
+                    grp = cerca
+
             cot = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"]
             con = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"]
 
