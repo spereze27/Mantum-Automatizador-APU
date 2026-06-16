@@ -46,20 +46,32 @@ def _cop(x) -> str:
 _STRONG_UNITS = {"m3", "m2", "m", "kg", "gl", "lb", "in", "l", "ml_u"}
 
 def _unit_canon(s) -> str:
-    """Unidad canónica a partir de una celda de unidad. Solo unidades de medida
-    'fuertes' se usan para filtrar (und/global se consideran ambiguas)."""
+    """Unidad canónica a partir de una celda de unidad. Devuelve '' para unidades
+    no reconocibles o ambiguas (no se usan para filtrar)."""
     u = str(s or "").strip().lower()
     u = u.replace("³", "3").replace("²", "2").replace('"', "in")
     u = _re.sub(r"[^a-z0-9]", "", u)
     if u in ("m3", "mt3", "mts3"): return "m3"
     if u in ("m2", "mt2", "mts2"): return "m2"
-    if u in ("m", "ml", "mt", "mts", "metro", "metros"): return "m"
+    if u in ("m", "ml", "mt", "mts", "metro", "metros", "mlineal"): return "m"
     if u in ("kg", "kgs", "kilo", "kilos"): return "kg"
+    if u in ("gr", "g", "gramo", "gramos"): return "gr"
+    if u in ("ton", "tonelada", "toneladas", "tn"): return "ton"
     if u in ("gl", "gal", "galon", "galones"): return "gl"
     if u in ("lb", "lbs", "libra", "libras"): return "lb"
     if u in ("in", "pulg", "pulgada", "pulgadas"): return "in"
     if u in ("l", "lt", "lts", "litro", "litros"): return "l"
-    return ""  # und, global, lona, etc. -> ambiguo
+    if u in ("und", "un", "ud", "unidad", "unidades", "u", "c", "cu"): return "und"
+    if u in ("caja", "cja", "cjs", "cajas"): return "caja"
+    if u in ("bulto", "bto", "bultos"): return "bulto"
+    if u in ("rollo", "rollos", "rll"): return "rollo"
+    if u in ("kit", "juego", "jgo", "juegos"): return "kit"
+    if u in ("par", "pares"): return "par"
+    if u in ("hr", "hora", "horas", "h", "hh"): return "hr"
+    if u in ("dia", "dias", "jornal", "jornales"): return "dia"
+    if u in ("viaje", "viajes", "vje"): return "viaje"
+    if u in ("ml_u", "cc", "mililitro", "mililitros"): return "ml_u"
+    return ""  # global, %, lona, etc. -> ambiguo
 
 def _detect_unit_in_text(text: str) -> str:
     """Detecta una unidad de medida fuerte dentro de una descripción (p.ej.
@@ -340,15 +352,17 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         if matched and not comp.empty:
             grp = comp[comp["item_norm"].isin(match_norms)].copy()
 
-            # (1) Filtro por unidad: si el insumo tiene una unidad de medida fuerte
-            # (m3/m2/m/kg/gl/lb/in/l) y existen variantes con esa misma unidad,
-            # se restringe a ellas (evita comparar 'arena por m3' contra 'lona').
+            # (1) Filtro por unidad: si el insumo tiene una unidad reconocible, se
+            # restringe a registros con esa MISMA unidad (los que tengan una unidad
+            # distinta y conocida se descartan; los sin unidad se conservan). Evita
+            # mezclar precios de unidades distintas (p.ej. 200 vs 40.000).
             wh_u = _unit_canon(und)
-            if wh_u in _STRONG_UNITS and not grp.empty:
+            if wh_u and not grp.empty:
                 def _ru(r):
                     return _unit_canon(r.get("unidad")) or _detect_unit_in_text(r.get("descripcion"))
                 grp["_u"] = grp.apply(_ru, axis=1)
-                same = grp[grp["_u"] == wh_u]
+                # registros con unidad conocida distinta -> fuera; iguales o sin unidad -> ok
+                same = grp[(grp["_u"] == wh_u) | (grp["_u"] == "") | (grp["_u"].isna())]
                 if not same.empty:
                     grp = same
 
@@ -357,6 +371,15 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             # El COMPARATIVO sí excluye outliers para su promedio.
             con = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"].copy()
             cot_full = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"].copy()
+
+            # (1b) Mano de obra: en el Consolidado solo valen las NÓMINAS. Las demás
+            # líneas que contienen el rol (compras, materiales, etc.) ensucian el
+            # precio (de ahí los 200.000 / 2.000 sin sentido para 'Ayudante').
+            if categoria == "Mano de obra" and not con.empty and "descripcion" in con.columns:
+                desc_l = con["descripcion"].astype(str).str.lower()
+                nomina = con[desc_l.str.contains("nomin", na=False)]
+                con = nomina  # si no hay nóminas, queda vacío y se usa el comparativo
+
             cot = cot_full
             if len(cot_full) >= 4:
                 med = float(cot_full["precio"].median())
