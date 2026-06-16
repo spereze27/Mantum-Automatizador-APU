@@ -7,7 +7,7 @@ GCS, aplica **IPC**, hace **mapeo 1 a 1 (NLP)**, actualiza el Sheet y genera un
 comparativo regional.
 
 ---
-
+https://apu-comparativo-mtto-285116077661.us-central1.run.app
 ## 1. Estructura del proyecto
 
 ```
