@@ -101,7 +101,7 @@ def normalize(text: Optional[str]) -> str:
     # ayudante, etc.) domine el match en vez del ruido de nombres/fechas.
     if "nomina" in t:
         t = re.sub(r'\bnomina\b', ' ', t)
-        t = re.sub(r'\bdesde\b.*', ' ', t)  # corta todo desde 'desde el ... de mes'
+        t = re.sub(r'\b(desde|del)\b.*', ' ', t)  # corta el rango de fechas
     t = re.sub(r'\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|'
                r'septiembre|setiembre|octubre|noviembre|diciembre)\b', ' ', t)
     # Normaliza separadores típicos: '*', 'x', 'por' entre dimensiones.

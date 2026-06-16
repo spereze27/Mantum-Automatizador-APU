@@ -366,19 +366,23 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 if not same.empty:
                     grp = same
 
-            # Separación por fuente. El CONSOLIDADO se usa completo (sin recorte):
-            # de ahí sale el consumo real y el valor MÁXIMO (referencia pedida).
-            # El COMPARATIVO sí excluye outliers para su promedio.
-            con = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"].copy()
+            # Separación por fuente. El CONSOLIDADO completo se usa para mostrar
+            # TODAS las fuentes (dispersión) y para el consumo; pero para la
+            # REFERENCIA y los promedios se restringe a una banda de cordura
+            # alrededor de la BD [BD/ratio, BD·ratio], que descarta valores
+            # absurdos (p.ej. 'Ayudante' a 200.000 o 2.000) sin botar líneas
+            # legítimas por su redacción. Para material con valores altos cercanos
+            # a la BD (Transporte) la banda es amplia y los conserva.
+            con_all = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"].copy()
             cot_full = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"].copy()
 
-            # (1b) Mano de obra: en el Consolidado solo valen las NÓMINAS. Las demás
-            # líneas que contienen el rol (compras, materiales, etc.) ensucian el
-            # precio (de ahí los 200.000 / 2.000 sin sentido para 'Ayudante').
-            if categoria == "Mano de obra" and not con.empty and "descripcion" in con.columns:
-                desc_l = con["descripcion"].astype(str).str.lower()
-                nomina = con[desc_l.str.contains("nomin", na=False)]
-                con = nomina  # si no hay nóminas, queda vacío y se usa el comparativo
+            con = con_all
+            if valor_wh_proj and not con_all.empty:
+                lo = valor_wh_proj / settings.max_price_ratio
+                hi = valor_wh_proj * settings.max_price_ratio
+                con_band = con_all[(con_all["precio"] >= lo) & (con_all["precio"] <= hi)]
+                if not con_band.empty:
+                    con = con_band
 
             cot = cot_full
             if len(cot_full) >= 4:
@@ -390,7 +394,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             # + comparativo). El consumo, mínimo y máximo del consolidado salen de
             # TODAS sus facturas (no del subconjunto filtrado por precio).
             fuentes = []
-            grp_sorted = pd.concat([con, cot_full]).sort_values("precio") if (not con.empty or not cot_full.empty) else grp.iloc[0:0]
+            grp_sorted = pd.concat([con_all, cot_full]).sort_values("precio") if (not con_all.empty or not cot_full.empty) else grp.iloc[0:0]
             for _, fr in grp_sorted.head(120).iterrows():
                 fuentes.append(
                     f"{fr.get('archivo','')} [{fr.get('region','')}"

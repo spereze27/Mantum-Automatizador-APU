@@ -257,36 +257,37 @@ def build_items_revisar_sheet(writer, mapping: pd.DataFrame, top_impacto: int = 
     df = mapping.copy()
     df["_bd"] = pd.to_numeric(df.get(base_col), errors="coerce")
     df["_ap"] = pd.to_numeric(df.get("ahorro_ponderado"), errors="coerce").fillna(0)
+    df["_sc"] = pd.to_numeric(df.get("score"), errors="coerce").fillna(0)
 
-    seleccion = []  # (orden, item_row, razon, registros, vmin, vmax)
-    impacto_idx = set(df.reindex(df["_ap"].abs().sort_values(ascending=False).index).head(top_impacto).index)
+    SCORE_MIN = 95.0   # el match debe ser de al menos 95%
+    DESV = 0.70        # solo registros que difieren más de ±70% de la BD
+    seleccion = []     # (orden, impacto, row, razon, registros, vmin, vmax, bd)
 
     for idx, row in df.iterrows():
+        if row["_sc"] < SCORE_MIN:
+            continue
         recs = _parse_fuentes(row.get("todas_las_fuentes"))
         precios = [p for _, p in recs if p and p > 0]
         bd = row["_bd"]
-        if len(precios) < 1:
+        if len(precios) < 1 or not bd or bd <= 0:
             continue
         vmin, vmax = min(precios), max(precios)
+        # Gate: al menos un registro difiere más de ±70% de la BD.
+        fuera_70 = (vmin < bd * (1 - DESV)) or (vmax > bd * (1 + DESV))
+        if not fuera_70:
+            continue
         disp = (vmax / vmin) if vmin > 0 else 1
-        razon = None; orden = 3
-        # (a) registros muy diferentes entre sí
         if disp >= 3 and len(precios) >= 2:
             razon = "Tiene registros con valores muy diferentes entre sí."; orden = 0
-        # (b) todos los valores notablemente distintos a la BD
-        elif bd and bd > 0 and (min(vmin, vmax) > bd * 1.5 or max(vmin, vmax) < bd * 0.5):
+        elif (vmin > bd * (1 + DESV)) or (vmax < bd * (1 - DESV)):
             razon = "Todos los registros difieren notablemente del valor de la BD."; orden = 1
-        # (c) alto impacto
-        elif idx in impacto_idx and abs(row["_ap"]) > 0:
-            tipo = "ahorro" if row["_ap"] > 0 else "sobrecosto"
-            razon = f"Alto impacto en {tipo} potencial ({_cop(abs(row['_ap']))})."; orden = 2
-        if razon is None:
-            continue
+        else:
+            razon = "Tiene registros que difieren más del 70% del valor de la BD."; orden = 2
         seleccion.append((orden, abs(row["_ap"]), row, razon, recs, vmin, vmax, bd))
 
     seleccion.sort(key=lambda x: (x[0], -x[1]))
     if not seleccion:
-        ws.cell(r, 2, "Sin ítems dispersos ni de alto impacto.").font = val_f
+        ws.cell(r, 2, "Sin ítems con match ≥95% y diferencias mayores al 70%.").font = val_f
         return
 
     thin = Side(style="thin", color="DDDDDD")
