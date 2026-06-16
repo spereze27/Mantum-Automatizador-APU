@@ -501,23 +501,27 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
 
         diferencia_vs_ipc = pct_diferencia = por_encima_ipc = None
         ahorro_ponderado = None
+        sospechoso_pct = False
         qty = cantidad_consumo if (cantidad_consumo and cantidad_consumo > 0) else 1.0
         if precio_ref is not None and valor_wh_proj:
             ref_proj = round(precio_ref * factor_proj, 2)
             diferencia_vs_ipc = round(valor_wh_proj - ref_proj, 2)  # + = ahorro por unidad
             pct_diferencia = round((diferencia_vs_ipc / valor_wh_proj) * 100, 1)
             por_encima_ipc = ref_proj > valor_wh_proj
+            sospechoso_pct = abs(pct_diferencia) > 50  # diferencia >50% = sospechoso
             # Ahorro/sobrecosto ponderado por el consumo anual real.
             ahorro_ponderado = round(diferencia_vs_ipc * qty, 2)
 
-        if precio_ref is not None:
+        if precio_ref is not None and not sospechoso_pct:
             # Valor a escribir: precio de referencia proyectado al año objetivo
             # (IPC para material/viáticos, salario mínimo para mano de obra).
             nuevo_valor = round(precio_ref * factor_proj, 2)
             actualizado = True
         else:
-            # Sin fuente que refute: se conserva el precio de PRIMARIOS, proyectado
-            # con el mismo factor (al año actual el factor es 1, queda igual).
+            # Sin fuente confiable, o diferencia sospechosa (>50%): NO se adopta el
+            # valor de mercado. Se conserva el precio de la BD proyectado por el
+            # factor (al año actual queda igual; al siguiente, IPC/SMLV). Estos
+            # casos quedan en la hoja 'Items a Revisar' para decisión manual.
             nuevo_valor = round(valor_wh * factor_proj, 2)
             actualizado = False
 
@@ -566,6 +570,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             "enlace_fuente": link_ref,
             "diferencia_vs_ipc": diferencia_vs_ipc,
             "pct_diferencia": pct_diferencia,
+            "sospechoso_dif_mayor_50pct": sospechoso_pct,
             "warehouse_por_debajo_del_mercado": por_encima_ipc,
             "descartado_por_magnitud": descartado_magnitud,
             "consumo_usado": qty,

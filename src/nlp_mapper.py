@@ -96,6 +96,14 @@ def normalize(text: Optional[str]) -> str:
     for k, v in _FRACTIONS.items():
         t = t.replace(k, v)
     t = _strip_accents(t)
+    # Limpieza de nóminas/facturas de mano de obra: quita 'NOMINA', el rango de
+    # fechas ('desde el 1 al 31 de mayo') y meses, para que el ROL (oficial pintor,
+    # ayudante, etc.) domine el match en vez del ruido de nombres/fechas.
+    if "nomina" in t:
+        t = re.sub(r'\bnomina\b', ' ', t)
+        t = re.sub(r'\bdesde\b.*', ' ', t)  # corta todo desde 'desde el ... de mes'
+    t = re.sub(r'\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|'
+               r'septiembre|setiembre|octubre|noviembre|diciembre)\b', ' ', t)
     # Normaliza separadores típicos: '*', 'x', 'por' entre dimensiones.
     t = re.sub(r'(?<=\d)\s*[x×]\s*(?=\d)', ' x ', t)
     t = re.sub(r'\bpor\b', ' x ', t)
@@ -218,7 +226,7 @@ class ItemMatcher:
         thr = self.fuzzy_threshold if min_score is None else min_score
 
         def _blended(a: str, b: str) -> float:
-            return 0.6 * fuzz.token_set_ratio(a, b) + 0.4 * fuzz.token_sort_ratio(a, b)
+            return 0.7 * fuzz.token_set_ratio(a, b) + 0.3 * fuzz.token_sort_ratio(a, b)
 
         scored = process.extract(norm, self._norm, scorer=_blended, limit=limit)
         out = []
@@ -246,22 +254,24 @@ class ItemMatcher:
         # puede dar 100 cuando un texto es subconjunto trivial del otro (ej. un
         # código "a 3"). Lo mezclamos con token_sort_ratio para penalizar eso.
         def _blended(a: str, b: str) -> float:
-            return 0.6 * fuzz.token_set_ratio(a, b) + 0.4 * fuzz.token_sort_ratio(a, b)
+            return 0.7 * fuzz.token_set_ratio(a, b) + 0.3 * fuzz.token_sort_ratio(a, b)
 
-        best = process.extractOne(norm, self._norm, scorer=_blended)
-        if best:
-            cand_norm, score = best[0], float(best[1])
+        best = process.extract(norm, self._norm, scorer=_blended, limit=10)
+        for cand_norm, score in best:
+            score = float(score)
+            if score < self.fuzzy_threshold:
+                break  # vienen ordenados; nada más alcanza el umbral
+            if self._is_generic_candidate(norm, cand_norm) or self._number_mismatch(norm, cand_norm):
+                continue  # candidato genérico o con código/medida distinta: siguiente
             idx = self._norm.index(cand_norm)
-            if (score >= self.fuzzy_threshold and not self._is_generic_candidate(norm, cand_norm)
-                    and not self._number_mismatch(norm, cand_norm)):
-                return MatchResult(
-                    matched=True,
-                    candidate_raw=self._raw[idx],
-                    candidate_norm=cand_norm,
-                    score=score,
-                    method="fuzzy",
-                    unit_match=self._unit_match(unit, idx),
-                )
+            return MatchResult(
+                matched=True,
+                candidate_raw=self._raw[idx],
+                candidate_norm=cand_norm,
+                score=score,
+                method="fuzzy",
+                unit_match=self._unit_match(unit, idx),
+            )
 
         # --- Pasada 2: embeddings (opcional) ---
         if self.use_embeddings and self._embeddings is not None:
@@ -281,10 +291,11 @@ class ItemMatcher:
                     unit_match=self._unit_match(unit, idx),
                 )
 
-        # Sin match aceptable: devolvemos el mejor fuzzy como referencia.
+        # Sin match aceptable: devolvemos el mejor fuzzy como referencia (no matched).
         if best:
-            idx = self._norm.index(best[0])
-            return MatchResult(False, self._raw[idx], best[0], float(best[1]), "fuzzy", False)
+            cn, sc = best[0][0], float(best[0][1])
+            idx = self._norm.index(cn)
+            return MatchResult(False, self._raw[idx], cn, sc, "fuzzy", False)
         return MatchResult(False, None, None, 0.0, "none", False)
 
     def _unit_match(self, unit: str, idx: int) -> bool:

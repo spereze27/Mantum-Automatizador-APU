@@ -31,7 +31,8 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
         "consumo_anual",
         "precio_referencia", "como_se_calculo", "de_donde_salio_el_precio",
         "fuente_que_refuta", "enlace_fuente",
-        "diferencia_vs_ipc", "pct_diferencia", "warehouse_por_debajo_del_mercado",
+        "diferencia_vs_ipc", "pct_diferencia", "sospechoso_dif_mayor_50pct",
+        "warehouse_por_debajo_del_mercado",
         "descartado_por_magnitud",
         "consumo_usado", "ahorro_ponderado", "anio_actualizado",
         "nuevo_valor", "actualizado",
@@ -228,7 +229,7 @@ def build_excel_report(
 
 def _items_a_revisar(mapping: pd.DataFrame, umbral: float = 1.5) -> pd.DataFrame:
     """Selecciona los cruces cuya referencia difiere del valor de la BD por más
-    de `umbral`x (o menos de 1/umbral), para auditoría manual. Ordena por la
+    de ±50% (ref > 1.5x BD o < 0.5x BD), para auditoría manual. Ordena por la
     desviación (los más alejados primero)."""
     if mapping is None or mapping.empty:
         return pd.DataFrame()
@@ -241,14 +242,17 @@ def _items_a_revisar(mapping: pd.DataFrame, umbral: float = 1.5) -> pd.DataFrame
     if df.empty:
         return pd.DataFrame()
     ratio = pd.to_numeric(df["precio_referencia"], errors="coerce") / pd.to_numeric(df[base_col], errors="coerce")
-    df = df.assign(relacion_ref_vs_bd=ratio.round(2))
-    df = df[(ratio > umbral) | (ratio < 1.0 / umbral)]
+    df = df.assign(
+        relacion_ref_vs_bd=ratio.round(2),
+        pct_vs_bd=((ratio - 1.0) * 100).round(1),  # + = mercado más caro que la BD
+    )
+    df = df[(ratio > 1.5) | (ratio < 0.5)]   # más de ±50%
     if df.empty:
         return pd.DataFrame()
     df = df.assign(_dev=(ratio[df.index] - 1.0).abs()).sort_values("_dev", ascending=False)
     cols = [c for c in [
         "codigo", "descripcion_wh", "und_wh", "categoria", "score", "candidato",
-        base_col, "precio_referencia", "relacion_ref_vs_bd",
+        base_col, "precio_referencia", "relacion_ref_vs_bd", "pct_vs_bd",
         "precio_consolidado_promedio", "n_facturas_consolidado",
         "precio_comparativo_promedio", "precio_comparativo_max", "n_cotizaciones",
         "como_se_calculo", "de_donde_salio_el_precio", "todas_las_fuentes",
@@ -350,6 +354,22 @@ def compute_stats(matches: pd.DataFrame, comparativos: pd.DataFrame) -> dict:
         s["sobrecosto_potencial_total"] = round(float(-above[val_col].sum()) + 0.0, 0)
         s["diferencia_neta_total"] = round(float(m[val_col].sum()), 0)
         s["ahorro_ponderado_por_consumo"] = bool(val_col == "ahorro_ponderado")
+        s["items_sospechosos_mayor_50pct"] = int(
+            matches["sospechoso_dif_mayor_50pct"].fillna(False).sum()
+        ) if "sospechoso_dif_mayor_50pct" in matches.columns else 0
+        # Base anual (valor BD proyectado x consumo) para expresar el ahorro en %.
+        base_col_v = "valor_wh_proyectado" if "valor_wh_proyectado" in m.columns else "valor_wh"
+        if base_col_v in m.columns:
+            qcol = "consumo_usado" if "consumo_usado" in m.columns else None
+            base = pd.to_numeric(m[base_col_v], errors="coerce").fillna(0)
+            if qcol:
+                base = base * pd.to_numeric(m[qcol], errors="coerce").fillna(1)
+            total_base = float(base.sum())
+            if total_base > 0:
+                s["base_anual_total"] = round(total_base, 0)
+                s["ahorro_potencial_pct"] = round(s["ahorro_potencial_total"] / total_base * 100, 1)
+                s["sobrecosto_potencial_pct"] = round(s["sobrecosto_potencial_total"] / total_base * 100, 1)
+                s["diferencia_neta_pct"] = round(s["diferencia_neta_total"] / total_base * 100, 1)
 
         # Segmentación por categoría: Material | Mano de obra | Viáticos.
         por_cat = {}
@@ -400,12 +420,21 @@ def build_conclusions(s: dict) -> list:
         f"al que daría aplicar solo el IPC (oportunidad de ahorro), y en "
         f"{s.get('items_mercado_mas_caro_que_ipc', 0)} el mercado está por ENCIMA del IPC."
     )
+    def _pct(k):
+        v = s.get(k)
+        return f" ({v:.1f}% del gasto base)" if v is not None else ""
     c.append(
-        f"Ahorro potencial identificado: {cop(s.get('ahorro_potencial_total', 0))}. "
-        f"Sobrecosto potencial: {cop(s.get('sobrecosto_potencial_total', 0))}. "
-        f"Diferencia neta: {cop(s.get('diferencia_neta_total', 0))} "
-        "(positivo = el mercado está, en neto, por debajo del ajuste por IPC)."
+        f"Ahorro potencial: {cop(s.get('ahorro_potencial_total', 0))}{_pct('ahorro_potencial_pct')}. "
+        f"Sobrecosto potencial: {cop(s.get('sobrecosto_potencial_total', 0))}{_pct('sobrecosto_potencial_pct')}. "
+        f"Diferencia neta: {cop(s.get('diferencia_neta_total', 0))}{_pct('diferencia_neta_pct')} "
+        "(positivo = el mercado está, en neto, por debajo del ajuste proyectado)."
     )
+    if s.get("items_sospechosos_mayor_50pct"):
+        c.append(
+            f"{s['items_sospechosos_mayor_50pct']} ítems tienen una diferencia mayor al 50% "
+            "frente a la BD: se marcaron como SOSPECHOSOS, no se actualizan al valor de "
+            "mercado y quedan en la hoja 'Items a Revisar' para decisión manual."
+        )
     if s.get("top5_regiones_mas_costosas"):
         caras = ", ".join(f"{r} ({i:.2f})" for r, i in s["top5_regiones_mas_costosas"][:3])
         c.append(f"Regiones más costosas (índice vs. mediana nacional): {caras}.")
