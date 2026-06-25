@@ -171,6 +171,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
     C_UND = _resolve_col(wh, settings.wh_col_und)
     C_PRECIO = _resolve_col(wh, settings.wh_col_precio)
     C_GRUPO = _resolve_col(wh, settings.wh_col_grupo)
+    C_CLASIF = _resolve_col(wh, settings.wh_col_clasificacion)
     if C_DESC is None or C_PRECIO is None or C_GRUPO is None:
         result.errors.append(
             "No encuentro columnas del warehouse. "
@@ -446,20 +447,28 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                     })
 
         # Precio de referencia:
-        #   - Si hay CONSOLIDADO (gasto real): se usa su valor MÁXIMO. En insumos
-        #     con registros dispersos (p.ej. Transporte: muchos en 20k y algunos
-        #     en 200k cercanos a la BD), el máximo refleja mejor el costo real.
+        #   - Si hay CONSOLIDADO (gasto real): se compara su PROMEDIO y su MÁXIMO
+        #     contra el valor del warehouse y se elige el más cercano a la BD
+        #     (la BD sirve de ancla de cordura: en insumos dispersos como
+        #     Transporte el máximo es el más parecido; en otros lo es el promedio).
         #   - Si NO hay consolidado: promedio del comparativo excluyendo outliers.
         if precio_cons_max is not None:
-            precio_ref = precio_cons_max
-            tipo_ref = "Gasto real (Consolidado) - valor máximo"
+            cand = {"PROMEDIO": precio_cons_prom, "MÁXIMO": precio_cons_max}
+            cand = {k: v for k, v in cand.items() if v is not None}
+            if valor_wh_proj:
+                etiqueta = min(cand, key=lambda k: abs(cand[k] - valor_wh_proj))
+            else:
+                etiqueta = "MÁXIMO"
+            precio_ref = cand[etiqueta]
+            tipo_ref = f"Gasto real (Consolidado) - {etiqueta.lower()} (más cercano a la BD)"
             fuente_ref = arch_cons
             link_ref = link_cons
             region_ref = "Varias plantas"
             prov_ref = ""
             de_donde = (
-                f"Consolidado (gasto real): VALOR MÁXIMO {_cop(precio_cons_max)} "
-                f"de {n_cons} facturas (prom {_cop(precio_cons_prom)}, mín {_cop(precio_cons_min)})."
+                f"Consolidado (gasto real): se eligió el {etiqueta} {_cop(precio_ref)} "
+                f"por ser el más cercano a la BD ({_cop(valor_wh_proj)}); de {n_cons} facturas "
+                f"(prom {_cop(precio_cons_prom)}, máx {_cop(precio_cons_max)}, mín {_cop(precio_cons_min)})."
             )
         elif precio_comp_prom is not None:
             precio_ref = precio_comp_prom
@@ -540,6 +549,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             "descripcion_wh": desc,
             "und_wh": und,
             "grupo": row.get(C_GRUPO, ""),
+            "clasificacion": (row.get(C_CLASIF, "") if C_CLASIF else ""),
             "categoria": categoria,
             "candidato": candidato,
             "score": round(score, 2),

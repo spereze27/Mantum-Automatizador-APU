@@ -117,6 +117,9 @@ def normalize(text: Optional[str]) -> str:
     t = re.sub(r'[^a-z0-9 ./\-]', ' ', t)
     # Normaliza decimales con coma a punto.
     t = re.sub(r'(?<=\d),(?=\d)', '.', t)
+    # Quita puntos/guiones/slashes sueltos (no decimales ni fracciones), p.ej.
+    # 'instalacion.' -> 'instalacion', pero conserva 1.22, 1/2, etc.
+    t = re.sub(r'(?<![0-9])[./\-]+(?![0-9])', ' ', t)
     # Colapsa espacios.
     t = re.sub(r'\s+', ' ', t).strip()
     return t
@@ -190,6 +193,52 @@ class ItemMatcher:
             print(f"[nlp_mapper] embeddings deshabilitados: {exc}")
 
     @staticmethod
+    def _size_tokens(text: str) -> set:
+        """Extrae medidas de una descripción: fracciones (1/2), dimensiones
+        (1.22*2.44) y número+unidad (17mm, 6\", 6 pulg). Sirve para detectar que
+        dos ítems parecidos tienen medidas distintas (broca 1\" vs 1/2\")."""
+        import re as _r
+        s = str(text or "").lower().replace("\xa0", " ")
+        for k, v in _FRACTIONS.items():
+            s = s.replace(k, v)
+        toks = set()
+        for m in _r.findall(r'\d+\s*/\s*\d+', s):           # fracciones 1/2, 3/4
+            toks.add(_r.sub(r'\s', '', m))
+        for m in _r.findall(r'\d+(?:[.,]\d+)?\s*[x*×]\s*\d+(?:[.,]\d+)?', s):  # 1.22*2.44
+            toks.add(_r.sub(r'\s*[x*×]\s*', 'x', m).replace(',', '.'))
+        for m in _r.finditer(r'(\d+(?:[.,]\d+)?)\s*(mm|cm|pulg\w*|in\b|")', s):  # 17mm, 6"
+            u = m.group(2)
+            u = "in" if (u == '"' or u == "in" or u.startswith("pulg")) else u
+            toks.add(m.group(1).replace(",", ".") + u)
+        return toks
+
+    @classmethod
+    def _size_mismatch(cls, q_raw: str, c_raw: str) -> bool:
+        """True si ambos tienen medidas y NO coinciden exactamente (p.ej.
+        Superboard 17mm vs 8mm, broca 1\" vs 1/2\")."""
+        qs, cs = cls._size_tokens(q_raw), cls._size_tokens(c_raw)
+        if not qs or not cs:
+            return False
+        return bool(qs ^ cs)  # diferencia simétrica no vacía -> medidas distintas
+
+    @staticmethod
+    def _head_mismatch(q_norm: str, c_norm: str) -> bool:
+        """True si el sustantivo principal del candidato (primer token) no aparece
+        en el insumo (ni por prefijo). Evita cruces como Tee→Tubo, Sifón→Tee,
+        Neopreno→Tornillo Neopreno (elementos distintos)."""
+        qt = [t for t in q_norm.split() if len(t) >= 3]
+        ct = [t for t in c_norm.split() if len(t) >= 3]
+        if not qt or not ct:
+            return False
+        head = ct[0]
+        for t in qt:
+            if head == t:
+                return False
+            if len(head) >= 4 and len(t) >= 4 and head[:4] == t[:4]:
+                return False
+        return True
+
+    @staticmethod
     def _number_mismatch(query_norm: str, cand_norm: str) -> bool:
         """True si ambos textos tienen números (códigos/medidas) y NO comparten
         ninguno. Ej.: 'viniltex 1520' vs 'viniltex 1501' -> son productos
@@ -233,8 +282,11 @@ class ItemMatcher:
         for cand_norm, score in scored:
             if score < thr:
                 continue
-            if self._is_generic_candidate(norm, cand_norm) or self._number_mismatch(norm, cand_norm):
-                continue  # candidato genérico o con código/medida distinta
+            idx0 = self._norm.index(cand_norm)
+            if (self._is_generic_candidate(norm, cand_norm) or self._number_mismatch(norm, cand_norm)
+                    or self._head_mismatch(norm, cand_norm)
+                    or self._size_mismatch(description, self._raw[idx0])):
+                continue  # genérico, código/medida distinta o sustantivo distinto
             idx = self._norm.index(cand_norm)
             out.append({
                 "norm": cand_norm,
@@ -261,8 +313,11 @@ class ItemMatcher:
             score = float(score)
             if score < self.fuzzy_threshold:
                 break  # vienen ordenados; nada más alcanza el umbral
-            if self._is_generic_candidate(norm, cand_norm) or self._number_mismatch(norm, cand_norm):
-                continue  # candidato genérico o con código/medida distinta: siguiente
+            idx0 = self._norm.index(cand_norm)
+            if (self._is_generic_candidate(norm, cand_norm) or self._number_mismatch(norm, cand_norm)
+                    or self._head_mismatch(norm, cand_norm)
+                    or self._size_mismatch(description, self._raw[idx0])):
+                continue  # genérico, código/medida distinta o sustantivo distinto: siguiente
             idx = self._norm.index(cand_norm)
             return MatchResult(
                 matched=True,

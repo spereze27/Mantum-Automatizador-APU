@@ -29,7 +29,7 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
     """Detalle del cruce warehouse <-> fuente, con la fuente que refuta el
     precio, el enlace a ella y la diferencia frente al escenario solo-IPC."""
     cols = [
-        "codigo", "descripcion_wh", "und_wh", "grupo", "categoria",
+        "codigo", "descripcion_wh", "und_wh", "grupo", "clasificacion", "categoria",
         "candidato", "score", "metodo", "unidad_coincide",
         "valor_wh", "valor_wh_proyectado", "factor_proyeccion",
         "precio_comparativo_promedio", "precio_comparativo_min",
@@ -302,6 +302,11 @@ def build_items_revisar_sheet(writer, mapping: pd.DataFrame, top_impacto: int = 
         cr = ws.cell(r, 1, f"  {razon}")
         cr.font = razon_f; cr.fill = naranja_fill
         r += 1
+        clasif = str(row.get("clasificacion") or "").strip()
+        if clasif and clasif.lower() not in ("nan", "none"):
+            ws.cell(r, 2, "Clasificación:").font = lbl_f; ws.cell(r, 2).alignment = Alignment("right")
+            ws.cell(r, 3, clasif).font = val_f
+            r += 1
         # Valores BD / min / max
         ws.cell(r, 2, "Valor de la BD (Wh):").font = lbl_f
         ws.cell(r, 2).alignment = Alignment("right")
