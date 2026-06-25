@@ -83,6 +83,9 @@ class Settings:
     wh_col_precio: str = field(default_factory=lambda: os.getenv("WH_COL_PRECIO", "Precio de Lista"))
     wh_col_grupo: str = field(default_factory=lambda: os.getenv("WH_COL_GRUPO", "Grupo"))
     wh_col_clasificacion: str = field(default_factory=lambda: os.getenv("WH_COL_CLASIFICACION", "Clasificación"))
+    # Procesar solo actividades activas (Clasificación == 'Activa').
+    only_active: bool = field(default_factory=lambda: os.getenv("ONLY_ACTIVE", "true").lower() == "true")
+    wh_active_value: str = field(default_factory=lambda: os.getenv("WH_ACTIVE_VALUE", "Activa"))
 
     # --- Credenciales ---
     # En Cloud Run se usa la SA del runtime (ADC). En local/CI se puede pasar el

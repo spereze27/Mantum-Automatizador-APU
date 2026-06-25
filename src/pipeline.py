@@ -189,8 +189,26 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         & wh["_valor"].notna()
         & wh["_grupo_norm"].isin(MATCHABLE_GROUPS)
     )
+    # Solo actividades ACTIVAS (la columna Clasificación marca Activa/Inactiva/
+    # Duplicado/Reubicar). Las inactivas no se actualizan ni cuentan.
+    if settings.only_active and C_CLASIF is not None:
+        clasif_norm = wh[C_CLASIF].astype(str).str.strip().str.lower()
+        mask = mask & clasif_norm.eq(settings.wh_active_value.strip().lower())
     insumos = wh[mask].copy()
     result.insumos_evaluados = len(insumos)
+
+    # Distribución por Clasificación sobre TODO el warehouse (filas con descripción
+    # real), para el resumen del reporte: Activa / Inactiva / Duplicado / vacío /
+    # Reubicar. Sirve de contexto ("de las N Activas, actualizables M").
+    clasif_distribucion: dict[str, int] = {}
+    if C_CLASIF is not None:
+        _has_desc = wh[C_DESC].astype(str).str.strip().ne("")
+        _vc = (
+            wh.loc[_has_desc, C_CLASIF]
+            .astype(str).str.strip().replace("", "(vacío)")
+            .value_counts()
+        )
+        clasif_distribucion = {str(k): int(v) for k, v in _vc.items()}
 
     # --- 2. Comparativos (cotizaciones) + Consolidado (gasto real) ---
     try:
@@ -349,6 +367,8 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         link_cons = arch_cons = None
         todas_las_fuentes = None
         cantidad_consumo = None
+        lo_band = hi_band = None
+        n_con_fuera = n_cot_fuera = 0
 
         if matched and not comp.empty:
             grp = comp[comp["item_norm"].isin(match_norms)].copy()
@@ -377,25 +397,41 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             con_all = grp[grp["fuente_tipo"] == "Gasto real (Consolidado)"].copy()
             cot_full = grp[grp["fuente_tipo"] != "Gasto real (Consolidado)"].copy()
 
+            # Banda de cordura alrededor de la BD [BD/ratio, BD·ratio]. Se aplica a
+            # AMBAS fuentes (consolidado y comparativo) para los cálculos de
+            # referencia y promedios. Descarta valores absurdos tanto ALTOS (p.ej.
+            # una factura del kit/presentación completa a ~$1.000.000 frente a un
+            # precio por Kg de $52.000) como BAJOS (p.ej. un comparativo mal
+            # parseado a $9). CLAVE: si TODOS los registros de una fuente caen fuera
+            # de la banda, esa fuente queda VACÍA; NO se hace fallback a usar los
+            # valores absurdos (antes el consolidado caía de nuevo en con_all).
+            lo_band = hi_band = None
+            if valor_wh_proj:
+                lo_band = valor_wh_proj / settings.max_price_ratio
+                hi_band = valor_wh_proj * settings.max_price_ratio
+
             con = con_all
-            if valor_wh_proj and not con_all.empty:
-                lo = valor_wh_proj / settings.max_price_ratio
-                hi = valor_wh_proj * settings.max_price_ratio
-                con_band = con_all[(con_all["precio"] >= lo) & (con_all["precio"] <= hi)]
-                if not con_band.empty:
-                    con = con_band
+            if lo_band is not None and not con_all.empty:
+                con = con_all[(con_all["precio"] >= lo_band) & (con_all["precio"] <= hi_band)]
+                n_con_fuera = len(con_all) - len(con)
 
             cot = cot_full
-            if len(cot_full) >= 4:
-                med = float(cot_full["precio"].median())
+            if lo_band is not None and not cot_full.empty:
+                cot = cot_full[(cot_full["precio"] >= lo_band) & (cot_full["precio"] <= hi_band)]
+                n_cot_fuera = len(cot_full) - len(cot)
+            # Recorte adicional de outliers del comparativo por mediana (cuando ya
+            # hay varias cotizaciones dentro de la banda).
+            if len(cot) >= 4:
+                med = float(cot["precio"].median())
                 if med > 0:
-                    cot = cot_full[(cot_full["precio"] >= med / 4) & (cot_full["precio"] <= med * 4)]
+                    cot = cot[(cot["precio"] >= med / 4) & (cot["precio"] <= med * 4)]
 
-            # (3) Todas las fuentes consultadas para este ítem (consolidado completo
-            # + comparativo). El consumo, mínimo y máximo del consolidado salen de
-            # TODAS sus facturas (no del subconjunto filtrado por precio).
+            # (3) Detalle de fuentes consultadas DENTRO de la banda de cordura (las
+            # realmente consideradas). Las que quedaron fuera de rango se omiten del
+            # detalle y se reportan como un conteo, para no contaminar el reporte con
+            # valores absurdos pero dejando rastro de que existían.
             fuentes = []
-            grp_sorted = pd.concat([con_all, cot_full]).sort_values("precio") if (not con_all.empty or not cot_full.empty) else grp.iloc[0:0]
+            grp_sorted = pd.concat([con, cot]).sort_values("precio") if (not con.empty or not cot.empty) else grp.iloc[0:0]
             for _, fr in grp_sorted.head(120).iterrows():
                 fuentes.append(
                     f"{fr.get('archivo','')} [{fr.get('region','')}"
@@ -404,6 +440,11 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 )
             if len(grp_sorted) > 120:
                 fuentes.append(f"(+{len(grp_sorted) - 120} fuentes más)")
+            if (n_con_fuera + n_cot_fuera) > 0:
+                fuentes.append(
+                    f"(+{n_con_fuera + n_cot_fuera} fuera del rango de cordura "
+                    f"[{_cop(lo_band)} , {_cop(hi_band)}], omitidas)"
+                )
             todas_las_fuentes = " ; ".join(fuentes) if fuentes else None
 
             if not cot.empty:
@@ -420,6 +461,15 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 arch_comp_max = rmax.get("archivo", "")
                 link_comp = _gcs_link(rmin.get("gcs_path", ""))
 
+            # Consumo total real: suma de Cantidad de TODAS las facturas del
+            # consolidado para este insumo (con_all), independiente de la banda de
+            # cordura de precio (el consumo es real aunque algún precio esté en otra
+            # escala/alcance y se descarte para la referencia).
+            if not con_all.empty and "cantidad" in con_all.columns:
+                qsum_all = pd.to_numeric(con_all["cantidad"], errors="coerce").dropna()
+                if not qsum_all.empty and float(qsum_all.sum()) > 0:
+                    cantidad_consumo = round(float(qsum_all.sum()), 2)
+
             if not con.empty:
                 precio_cons_prom = round(float(con["precio"].mean()), 2)
                 precio_cons_med = round(float(con["precio"].median()), 2)
@@ -427,11 +477,6 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 precio_cons_max = round(float(con["precio"].max()), 2)
                 n_cons = int(len(con))
                 arch_cons = con.iloc[0].get("archivo", "")
-                # Consumo total real (suma de Cantidad de las facturas del Consolidado).
-                if "cantidad" in con.columns:
-                    qsum = pd.to_numeric(con["cantidad"], errors="coerce").dropna()
-                    if not qsum.empty and float(qsum.sum()) > 0:
-                        cantidad_consumo = round(float(qsum.sum()), 2)
                 link_cons = _gcs_link(con.iloc[0].get("gcs_path", ""))
                 for reg, sub in con.groupby("region"):
                     consolidado_por_planta.append({
@@ -484,7 +529,15 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         else:
             precio_ref = None
             fuente_ref = tipo_ref = link_ref = region_ref = prov_ref = None
-            de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
+            if (n_con_fuera + n_cot_fuera) > 0 and lo_band is not None:
+                de_donde = (
+                    f"Sin fuente dentro del rango de cordura: {n_con_fuera + n_cot_fuera} "
+                    f"registro(s) quedaron fuera de [{_cop(lo_band)} , {_cop(hi_band)}] "
+                    f"respecto a la BD ({_cop(valor_wh_proj)}); probable unidad/alcance "
+                    f"distinto. Se mantiene el valor de la BD."
+                )
+            else:
+                de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
         # (La referencia ya usa solo el consolidado cuando existe, así que no hay
         # mezcla de fuentes que reconciliar.)
@@ -617,6 +670,14 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
     regional = analytics.regional_comparison(comparativos)
     pivot = analytics.regional_pivot(comparativos)
     stats = analytics.compute_stats(matches, comparativos)
+    # Resumen por Clasificación (contexto de cobertura): distribución completa del
+    # warehouse + cuántas Activas son actualizables.
+    stats["clasificacion"] = {
+        "distribucion": clasif_distribucion,
+        "valor_activa": settings.wh_active_value,
+        "activas_evaluables": result.insumos_evaluados,
+        "activas_actualizables": result.cruces_validos,
+    }
     conclusiones = analytics.build_conclusions(stats)
     stats["_conclusiones"] = conclusiones
     result.stats = stats

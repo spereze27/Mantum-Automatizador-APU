@@ -178,6 +178,36 @@ def regional_pivot(comparativos: pd.DataFrame) -> pd.DataFrame:
 # Exportación del reporte (xlsx en memoria)
 # ---------------------------------------------------------------------------
 
+def _clasificacion_frame(stats: dict) -> pd.DataFrame:
+    """Resumen de la columna Clasificación de PRIMARIOS: cuántas actividades hay
+    de cada estado en el warehouse y, de las Activas, cuántas son actualizables."""
+    cl = (stats or {}).get("clasificacion", {})
+    dist = cl.get("distribucion", {}) or {}
+    valor_activa = str(cl.get("valor_activa", "Activa"))
+    filas = []
+    total = 0
+    # Orden: Activa primero, luego el resto por cantidad descendente.
+    items = sorted(dist.items(), key=lambda kv: (kv[0].strip().lower() != valor_activa.strip().lower(), -kv[1]))
+    for nombre, cant in items:
+        filas.append({"Clasificación": nombre, "Cantidad": int(cant)})
+        total += int(cant)
+    if filas:
+        filas.append({"Clasificación": "TOTAL", "Cantidad": total})
+    evaluables = cl.get("activas_evaluables")
+    actualizables = cl.get("activas_actualizables")
+    if evaluables is not None:
+        filas.append({
+            "Clasificación": f"{valor_activa} evaluables (grupo cruzable + precio)",
+            "Cantidad": int(evaluables),
+        })
+    if actualizables is not None:
+        filas.append({
+            "Clasificación": f"{valor_activa} actualizables (con fuente que refuta)",
+            "Cantidad": int(actualizables),
+        })
+    return pd.DataFrame(filas) if filas else pd.DataFrame({"info": ["sin datos de clasificación"]})
+
+
 def _categoria_frame(stats: dict) -> pd.DataFrame:
     pc = (stats or {}).get("por_categoria", {})
     filas = []
@@ -356,6 +386,9 @@ def build_excel_report(
             )
             _categoria_frame(stats).to_excel(
                 writer, sheet_name="Resumen por Categoria", index=False
+            )
+            _clasificacion_frame(stats).to_excel(
+                writer, sheet_name="Resumen por Clasificacion", index=False
             )
         (mapping if not mapping.empty else pd.DataFrame({"info": ["sin datos"]})).to_excel(
             writer, sheet_name="Mapping y Refutacion", index=False
@@ -600,6 +633,17 @@ def build_conclusions(s: dict) -> list:
                 f"[{cat}] {d['cruces']} ítems · ahorro {cop(d['ahorro_potencial'])} · "
                 f"sobrecosto {cop(d['sobrecosto_potencial'])} · neta {cop(d['diferencia_neta'])}."
             )
+    cl = s.get("clasificacion", {})
+    if cl.get("activas_evaluables") is not None:
+        va = str(cl.get("valor_activa", "Activa"))
+        ev = int(cl.get("activas_evaluables", 0))
+        act = int(cl.get("activas_actualizables", 0))
+        pct = f" ({act/ev*100:.1f}%)" if ev else ""
+        c.append(
+            f"De {ev} actividades {va} evaluables, es posible actualizar {act}{pct} "
+            f"(las demás se mantienen en la BD por no tener fuente que las refute o "
+            f"por diferencia sospechosa). Ver hoja 'Resumen por Clasificacion'."
+        )
     return c
 
 
@@ -619,6 +663,14 @@ def _stats_to_frame(s: dict, conclusiones: Optional[list]) -> pd.DataFrame:
         filas.append((f"Región más costosa #{i}", f"{r} (índice {v:.2f})"))
     for i, (r, v) in enumerate(s.get("top5_regiones_mas_economicas", []), 1):
         filas.append((f"Región más económica #{i}", f"{r} (índice {v:.2f})"))
+    cl = s.get("clasificacion", {})
+    dist = cl.get("distribucion", {}) or {}
+    for nombre, cant in sorted(dist.items(), key=lambda kv: -kv[1]):
+        filas.append((f"Clasificación · {nombre}", int(cant)))
+    if cl.get("activas_evaluables") is not None:
+        va = str(cl.get("valor_activa", "Activa"))
+        filas.append((f"{va} evaluables", int(cl.get("activas_evaluables", 0))))
+        filas.append((f"{va} actualizables", int(cl.get("activas_actualizables", 0))))
     for i, txt in enumerate(conclusiones or [], 1):
         filas.append((f"Conclusión {i}", txt))
     return pd.DataFrame(filas, columns=["Métrica", "Valor"])
