@@ -355,10 +355,15 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         # términos genéricos como 'Oficial' que juntarían cientos de líneas distintas.
         match_norms = set()
         if matched:
+            # El candidato principal YA pasó TODAS las guardias semánticas
+            # (cabeza/medida/número/genérico) dentro de match(); por tanto es un
+            # cruce vetado y SIEMPRE aporta su precio, aunque su score esté en
+            # [fuzzy_threshold, agg_min_score). El umbral agg_min_score se reserva
+            # para las VARIANTES ADICIONALES que se agrupan, evitando sobre-agrupar
+            # términos genéricos (p.ej. 'Oficial' juntando cientos de roles).
+            match_norms.add(cand_norm)
             for v in matcher.match_many(desc, und, limit=15, min_score=settings.agg_min_score):
                 match_norms.add(v["norm"])
-            if score >= settings.agg_min_score:
-                match_norms.add(cand_norm)
         # --- Agregación separada por fuente (se usa PROMEDIO) ---
         precio_comp_prom = precio_comp_min = precio_comp_med = precio_comp_max = n_comp = None
         region_comp = prov_comp = link_comp = arch_comp = col_comp = None
@@ -606,6 +611,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             "categoria": categoria,
             "candidato": candidato,
             "score": round(score, 2),
+            "confianza_match": ("Alta" if score >= 90 else "Media" if score >= settings.agg_min_score else "Baja"),
             "metodo": metodo,
             "unidad_coincide": m.unit_match,
             "valor_wh": round(valor_wh, 2),

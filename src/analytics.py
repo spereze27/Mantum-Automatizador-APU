@@ -30,7 +30,7 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
     precio, el enlace a ella y la diferencia frente al escenario solo-IPC."""
     cols = [
         "codigo", "descripcion_wh", "und_wh", "grupo", "clasificacion", "categoria",
-        "candidato", "score", "metodo", "unidad_coincide",
+        "candidato", "score", "confianza_match", "metodo", "unidad_coincide",
         "valor_wh", "valor_wh_proyectado", "factor_proyeccion",
         "precio_comparativo_promedio", "precio_comparativo_min",
         "precio_comparativo_mediana", "precio_comparativo_max", "n_cotizaciones",
