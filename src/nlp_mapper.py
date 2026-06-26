@@ -222,10 +222,21 @@ class ItemMatcher:
         return bool(qs ^ cs)  # diferencia simétrica no vacía -> medidas distintas
 
     @staticmethod
+    def _strip_labor_prefix(s: str) -> str:
+        """Quita la etiqueta de categoría 'mano de obra' / 'mano obra' (de la
+        abreviatura M.O.) para que NO actúe como sustantivo discriminante en las
+        guardias. Así 'M.O. Oficial Pintor' (-> 'mano de obra oficial pintor')
+        se compara por su rol real ('oficial pintor') contra el insumo 'Oficial
+        Pintor'. Aplica a TODAS las profesiones."""
+        return re.sub(r"\bmano\s+(?:de\s+)?obra\b", " ", str(s)).strip()
+
+    @staticmethod
     def _head_mismatch(q_norm: str, c_norm: str) -> bool:
         """True si el sustantivo principal del candidato (primer token) no aparece
         en el insumo (ni por prefijo). Evita cruces como Tee→Tubo, Sifón→Tee,
         Neopreno→Tornillo Neopreno (elementos distintos)."""
+        q_norm = ItemMatcher._strip_labor_prefix(q_norm)
+        c_norm = ItemMatcher._strip_labor_prefix(c_norm)
         qt = [t for t in q_norm.split() if len(t) >= 3]
         ct = [t for t in c_norm.split() if len(t) >= 3]
         if not qt or not ct:
@@ -258,7 +269,7 @@ class ItemMatcher:
         'oficial' -> genérico (no debe cruzar). Evita el doble conteo de roles."""
         def toks(s):
             return {t for t in str(s).split() if len(t) >= 3}
-        q, c = toks(query_norm), toks(cand_norm)
+        q, c = toks(ItemMatcher._strip_labor_prefix(query_norm)), toks(ItemMatcher._strip_labor_prefix(cand_norm))
         if not q or not c:
             return False
         return c < q  # subconjunto propio: candidato más genérico que el insumo

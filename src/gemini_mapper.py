@@ -38,7 +38,15 @@ def _build_backend(api_key, project, location, model_name, use_search):
             from google import genai
             from google.genai import types as gtypes
 
-            client = genai.Client(api_key=api_key)
+            # Timeout corto y SIN reintentos: si no hay cuota (429) o hay un error,
+            # que falle RÁPIDO. Así un corte de cuota no infla el tiempo del
+            # pipeline con esperas exponenciales (lo combinamos con un circuit
+            # breaker en cada clase que apaga Gemini tras varios fallos seguidos).
+            http = gtypes.HttpOptions(
+                timeout=20000,  # ms
+                retry_options=gtypes.HttpRetryOptions(attempts=1),
+            )
+            client = genai.Client(api_key=api_key, http_options=http)
             return "genai", (client, model_name, use_search), gtypes
         except Exception as exc:  # pragma: no cover
             print(f"[gemini] API key presente pero SDK google-genai no disponible: {exc}")
@@ -115,6 +123,8 @@ class GeminiResolver:
             api_key, project, location, model_name, use_search=False
         )
         self.enabled = self._backend is not None
+        self._fail_streak = 0
+        self._max_fails = 3  # tras N fallos seguidos, se apaga por el resto de la corrida
 
     def resolve(self, item: str, unit: str, candidates: list[dict]) -> Optional[GeminiChoice]:
         if not self.enabled or not candidates:
@@ -127,6 +137,7 @@ class GeminiResolver:
         try:
             text = self._generate(prompt, json_mode=True, max_tokens=256)
             data = _parse_json(text)
+            self._fail_streak = 0  # éxito: reinicia el contador
             if data is None:
                 return None
             idx = data.get("index", None)
@@ -139,7 +150,13 @@ class GeminiResolver:
                 reason=str(data.get("reason", ""))[:200],
             )
         except Exception as exc:  # pragma: no cover
+            self._fail_streak += 1
             print(f"[gemini] error resolviendo '{item[:40]}': {exc}")
+            if self._fail_streak >= self._max_fails:
+                self.enabled = False
+                print(f"[gemini] DESHABILITADO tras {self._fail_streak} fallos seguidos "
+                      f"(¿sin cuota / API key sin créditos?). El resto de la corrida "
+                      f"continúa SIN Gemini.")
             return None
 
     def _generate(self, prompt: str, json_mode: bool, max_tokens: int):
@@ -214,6 +231,8 @@ class GeminiPriceResearcher:
             api_key, project, location, model_name, use_search=True
         )
         self.enabled = self._backend is not None
+        self._fail_streak = 0
+        self._max_fails = 3  # tras N fallos seguidos, se apaga por el resto de la corrida
 
     @staticmethod
     def _to_cop(value) -> Optional[float]:
@@ -294,6 +313,7 @@ class GeminiPriceResearcher:
         result: Optional[PriceResearch] = None
         try:
             text, resp = self._generate_grounded(prompt)
+            self._fail_streak = 0  # éxito: reinicia el contador
             data = _parse_json(text)
             if data is not None:
                 precio = self._to_cop(data.get("precio"))
@@ -308,7 +328,13 @@ class GeminiPriceResearcher:
                         notas=str(data.get("notas", "") or "")[:200],
                     )
         except Exception as exc:  # pragma: no cover
+            self._fail_streak += 1
             print(f"[gemini-precio] error investigando '{str(item)[:40]}': {exc}")
+            if self._fail_streak >= self._max_fails:
+                self.enabled = False
+                print(f"[gemini-precio] DESHABILITADO tras {self._fail_streak} fallos "
+                      f"seguidos (¿sin cuota?). El resto de la corrida continúa sin "
+                      f"investigación web.")
             result = None
         self._cache[key] = result
         return result
