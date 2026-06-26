@@ -81,19 +81,59 @@ def _parse_json(text: str) -> Optional[dict]:
 
 
 def _grounding_url(resp) -> Optional[str]:
-    """Primer enlace de las citas de grounding de Google Search."""
+    """Primer enlace de las citas de grounding. Robusto a Vertex y Developer API:
+    intenta grounding_chunks[].web.uri y, si vienen vacíos (caso común en Vertex),
+    extrae los href del HTML de search_entry_point.rendered_content."""
     try:
         cand = resp.candidates[0]
         gm = getattr(cand, "grounding_metadata", None)
-        chunks = getattr(gm, "grounding_chunks", None) or []
-        for ch in chunks:
+        if gm is None:
+            return None
+        # 1) grounding_chunks -> web.uri / retrieved_context.uri
+        for ch in (getattr(gm, "grounding_chunks", None) or []):
             web = getattr(ch, "web", None)
             uri = getattr(web, "uri", None) if web else None
             if uri:
                 return uri
+            rc = getattr(ch, "retrieved_context", None)
+            uri = getattr(rc, "uri", None) if rc else None
+            if uri:
+                return uri
+        # 2) Fallback: href dentro del search_entry_point renderizado.
+        sep = getattr(gm, "search_entry_point", None)
+        rendered = getattr(sep, "rendered_content", None) if sep else None
+        if rendered:
+            m = re.search(r'href="([^"]+)"', rendered)
+            if m:
+                return m.group(1)
     except Exception:
         pass
     return None
+
+
+def _grounding_titles(resp) -> str:
+    """Nombres/dominios de las fuentes citadas (para mostrar como 'fuente')."""
+    titles = []
+    try:
+        gm = getattr(resp.candidates[0], "grounding_metadata", None)
+        for ch in (getattr(gm, "grounding_chunks", None) or []):
+            web = getattr(ch, "web", None)
+            t = getattr(web, "title", None) if web else None
+            if t and t not in titles:
+                titles.append(t)
+    except Exception:
+        pass
+    return ", ".join(titles[:3])
+
+
+def _mk_config(t, **kw):
+    """Construye GenerateContentConfig desactivando el 'thinking' (gemini-2.5 puede
+    consumir todo el presupuesto de tokens pensando y devolver text=None). Si la
+    versión del SDK no soporta thinking_config, lo arma sin él."""
+    try:
+        return t.GenerateContentConfig(thinking_config=t.ThinkingConfig(thinking_budget=0), **kw)
+    except Exception:
+        return t.GenerateContentConfig(**kw)
 
 
 @dataclass
@@ -146,10 +186,8 @@ class GeminiResolver:
             t = self._types
             resp = self._client.models.generate_content(
                 model=self._model_name, contents=prompt,
-                config=t.GenerateContentConfig(
-                    temperature=0.0, max_output_tokens=256,
-                    response_mime_type="application/json",
-                ),
+                config=_mk_config(t, temperature=0.0, max_output_tokens=512,
+                                  response_mime_type="application/json"),
             )
             text = getattr(resp, "text", "") or ""
             data = _parse_json(text)
@@ -273,10 +311,8 @@ class GeminiPriceResearcher:
             t = self._types
             resp = self._client.models.generate_content(
                 model=self._model_name, contents=prompt,
-                config=t.GenerateContentConfig(
-                    temperature=0.0, max_output_tokens=512,
-                    tools=[t.Tool(google_search=t.GoogleSearch())],
-                ),
+                config=_mk_config(t, temperature=0.0, max_output_tokens=900,
+                                  tools=[t.Tool(google_search=t.GoogleSearch())]),
             )
             text = getattr(resp, "text", "") or ""
             self._fail_streak = 0
@@ -285,11 +321,12 @@ class GeminiPriceResearcher:
                 precio = self._to_cop(data.get("precio"))
                 if precio is not None:
                     url = _grounding_url(resp) or str(data.get("fuente_url", "") or "")
+                    nombre = _grounding_titles(resp) or str(data.get("fuente_nombre", "") or "Referencia web").strip()
                     result = PriceResearch(
                         precio=precio,
                         unidad=str(data.get("unidad", "") or unit or "").strip(),
                         fuente_url=url,
-                        fuente_nombre=str(data.get("fuente_nombre", "") or "Referencia web").strip(),
+                        fuente_nombre=nombre,
                         confianza=float(data.get("confidence", 0) or 0),
                         notas=str(data.get("notas", "") or "")[:200],
                     )
