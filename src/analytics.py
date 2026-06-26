@@ -21,9 +21,9 @@ def _cop(x) -> str:
         return str(x)
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # 1. Mapeo 1 a 1 (ya construido en el pipeline; aquí solo se formatea)
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
     """Detalle del cruce warehouse <-> fuente, con la fuente que refuta el
