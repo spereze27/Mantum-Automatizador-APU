@@ -394,7 +394,7 @@ def _dispatch(content: bytes, filename: str, rule: FileRule) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def load_from_gcs(bucket_name: str, prefix: str, config_path: str, storage_client=None) -> pd.DataFrame:
+def load_from_gcs(bucket_name: str, prefix: str, config_path: str, storage_client=None, progress=None) -> pd.DataFrame:
     """Descarga todos los comparativos del bucket y devuelve un DataFrame tidy."""
     from google.cloud import storage
 
@@ -402,11 +402,16 @@ def load_from_gcs(bucket_name: str, prefix: str, config_path: str, storage_clien
     client = storage_client or storage.Client()
     bucket = client.bucket(bucket_name)
 
+    if progress is not None:
+        progress["fase"] = "Cargando cuadros comparativos…"
+
     frames = []
     for blob in client.list_blobs(bucket_name, prefix=prefix):
         if blob.name.endswith("/"):
             continue
         filename = os.path.basename(blob.name)
+        if progress is not None:
+            progress["fuente_actual"] = filename
         rule = cfg.rule_for(filename)
         if rule is None:
             print(f"[comparativos] sin regla para '{filename}', se omite.")
@@ -419,6 +424,9 @@ def load_from_gcs(bucket_name: str, prefix: str, config_path: str, storage_clien
                 df["fuente_tipo"] = "Cotización proveedor"
                 frames.append(df)
                 print(f"[comparativos] {filename}: {len(df)} precios ({rule.region}).")
+                if progress is not None:
+                    progress["comparativos_archivos"] = progress.get("comparativos_archivos", 0) + 1
+                    progress["comparativos_filas"] = progress.get("comparativos_filas", 0) + len(df)
             else:
                 print(f"[comparativos] {filename}: 0 filas parseadas.")
         except Exception as exc:

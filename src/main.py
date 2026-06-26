@@ -35,20 +35,23 @@ app = FastAPI(title="Mantum Automatizador APU", version="2.1.0")
 # --no-cpu-throttling y --max-instances 1 (ver deploy.yml).
 _JOB: dict = {
     "id": None, "status": "idle", "result": None, "error": None,
-    "started": None, "finished": None,
+    "started": None, "finished": None, "progress": {},
 }
 _JOB_LOCK = threading.Lock()
 
 
 def _run_job(settings, job_id: str) -> None:
+    # Dict mutable que el pipeline va actualizando; /status lo lee en vivo.
+    progress = _JOB.get("progress") or {}
     try:
-        result = run_pipeline(settings)
+        result = run_pipeline(settings, progress=progress)
         payload = _json_safe(asdict(result))
         with _JOB_LOCK:
             if _JOB["id"] == job_id:
                 _JOB["result"] = payload
                 _JOB["status"] = "done_with_errors" if result.errors else "done"
                 _JOB["finished"] = time.time()
+                progress["fase"] = "Listo"
     except Exception as exc:  # noqa: BLE001
         with _JOB_LOCK:
             if _JOB["id"] == job_id:
@@ -125,6 +128,7 @@ async def run(request: Request):
         _JOB.update({
             "id": job_id, "status": "running", "result": None, "error": None,
             "started": time.time(), "finished": None,
+            "progress": {"fase": "Iniciando…"},
         })
     threading.Thread(target=_run_job, args=(settings, job_id), daemon=True).start()
     return JSONResponse(status_code=202, content={"job_id": job_id, "status": "running"})
@@ -139,7 +143,8 @@ def status():
     started = j.get("started")
     finished = j.get("finished")
     elapsed = int((finished or time.time()) - started) if started else 0
-    payload = {"status": j["status"], "job_id": j["id"], "elapsed": elapsed}
+    payload = {"status": j["status"], "job_id": j["id"], "elapsed": elapsed,
+               "progress": j.get("progress") or {}}
     if j["status"] in ("done", "done_with_errors") and j["result"] is not None:
         payload["data"] = j["result"]
     if j["status"] == "error":
@@ -340,13 +345,26 @@ async function run(){
   }catch(e){ setStatus('❌ Error: '+e.message,true,false); btn.disabled=false; }
 }
 function fmtElapsed(s){ s=Number(s)||0; const m=Math.floor(s/60), r=s%60; return m?`${m}m ${r}s`:`${r}s`; }
+function progresoTexto(j){
+  const p=j.progress||{}; const parts=[];
+  parts.push('⏱ '+fmtElapsed(j.elapsed));
+  if(p.fase) parts.push('· '+p.fase);
+  const sub=[];
+  if(p.comparativos_archivos) sub.push('comparativos: '+p.comparativos_archivos+' archivos / '+(p.comparativos_filas||0)+' precios');
+  if(p.consolidado_filas) sub.push('consolidado: '+p.consolidado_filas.toLocaleString()+' registros');
+  if(p.insumos_total) sub.push('ítems: '+(p.insumos_procesados||0)+' / '+p.insumos_total);
+  if(p.gemini_max) sub.push('🔎 Gemini: '+(p.gemini_consultados||0)+' / '+p.gemini_max+' consultados');
+  if(p.fuente_actual && !p.insumos_total) sub.push('leyendo: '+p.fuente_actual);
+  let html = parts.join(' ');
+  if(sub.length) html += '<br><span style="opacity:.8;font-size:.92em">'+sub.join('  ·  ')+'</span>';
+  return html;
+}
 async function poll(){
   try{
     const r=await fetch('/status'); const j=await r.json();
     if(j.status==='running'){
-      setStatus('Procesando en segundo plano… ('+fmtElapsed(j.elapsed)+'). '+
-                'Puede tardar varios minutos si Gemini está activo. Puedes dejar esta pestaña abierta.');
-      setTimeout(poll, 4000); return;
+      setStatus(progresoTexto(j));
+      setTimeout(poll, 2500); return;
     }
     if(j.status==='error'){
       setStatus('❌ Error del pipeline: '+(j.error||'desconocido'),true,false);
@@ -355,13 +373,14 @@ async function poll(){
     if(j.status==='done' || j.status==='done_with_errors'){
       const d=j.data||{};
       render(d);
+      const p=j.progress||{};
+      const gem = p.gemini_consultados ? (' · '+p.gemini_consultados+' precio(s) consultados con Gemini') : '';
       setStatus('✅ Listo en '+fmtElapsed(j.elapsed)+'. '+
-                (d.dry_run?'(modo auditoría: no se escribió el Sheet)':'Warehouse actualizado.'),false,false);
+                (d.dry_run?'(modo auditoría: no se escribió el Sheet)':'Warehouse actualizado.')+gem,false,false);
       document.getElementById('go').disabled=false; return;
     }
-    // idle u otro estado: reintenta
-    setTimeout(poll, 4000);
-  }catch(e){ setStatus('Reintentando consulta de estado…'); setTimeout(poll, 5000); }
+    setTimeout(poll, 2500);
+  }catch(e){ setStatus('Reintentando consulta de estado…'); setTimeout(poll, 4000); }
 }
 // Si se recarga la página con una ejecución en curso, reanuda el sondeo.
 window.addEventListener('load', async ()=>{

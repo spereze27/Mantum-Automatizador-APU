@@ -143,7 +143,7 @@ def _resolve_col(df, wanted: str) -> Optional[str]:
     return None
 
 
-def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
+def run_pipeline(settings: Settings, storage_client=None, progress=None) -> PipelineResult:
     settings.validate()
     result = PipelineResult(dry_run=settings.dry_run, started_at=dt.datetime.utcnow().isoformat())
     result.bucket = settings.gcs_bucket_name
@@ -217,6 +217,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             settings.gcs_input_prefix,
             settings.comparativos_config_path,
             storage_client=storage_client,
+            progress=progress,
         )
     except Exception as exc:
         comparativos = pd.DataFrame()
@@ -228,6 +229,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             settings.gcs_bucket_name,
             settings.gcs_consolidado_prefix,
             storage_client=storage_client,
+            progress=progress,
         )
     except Exception as exc:
         consolidado = pd.DataFrame()
@@ -331,7 +333,16 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
     base_year = int(settings.update_year) if str(settings.update_year).strip() else dt.date.today().year
     siguiente = str(settings.update_mode).strip().lower() == "siguiente"
     anio_objetivo = base_year + 1 if siguiente else base_year
-    for _, row in insumos.iterrows():
+    if progress is not None:
+        progress["fase"] = "Cruzando ítems y consultando precios…"
+        progress["insumos_total"] = int(len(insumos))
+        progress["insumos_procesados"] = 0
+        progress["gemini_consultados"] = 0
+        progress["gemini_max"] = int(settings.gemini_price_max_items) if settings.use_gemini_price_research else 0
+    for _i, (_, row) in enumerate(insumos.iterrows()):
+        if progress is not None:
+            progress["insumos_procesados"] = _i + 1
+            progress["gemini_consultados"] = n_price_research
         desc = str(row.get(C_DESC, "")).strip()
         und = str(row.get(C_UND, "")).strip()
         categoria = _categoria(row.get(C_GRUPO, ""))

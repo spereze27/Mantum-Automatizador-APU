@@ -114,23 +114,29 @@ def parse_consolidado(content: bytes, filename: str) -> pd.DataFrame:
 
 
 def load_consolidado_from_gcs(
-    bucket_name: str, prefix: str, storage_client=None
+    bucket_name: str, prefix: str, storage_client=None, progress=None
 ) -> pd.DataFrame:
     """Descarga y parsea todos los Consolidados bajo `prefix` en el bucket."""
     from google.cloud import storage
 
     client = storage_client or storage.Client()
+    if progress is not None:
+        progress["fase"] = "Cargando consolidado (gasto real)…"
     frames = []
     for blob in client.list_blobs(bucket_name, prefix=prefix):
         if blob.name.endswith("/") or not blob.name.lower().endswith((".xlsx", ".xlsm")):
             continue
         filename = blob.name.split("/")[-1]
+        if progress is not None:
+            progress["fuente_actual"] = filename
         try:
             df = parse_consolidado(blob.download_as_bytes(), filename)
             if not df.empty:
                 df["gcs_path"] = blob.name
                 frames.append(df)
                 print(f"[consolidado] {filename}: {len(df)} registros de gasto real.")
+                if progress is not None:
+                    progress["consolidado_filas"] = progress.get("consolidado_filas", 0) + len(df)
         except Exception as exc:
             print(f"[consolidado] ERROR en {filename}: {exc}")
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
