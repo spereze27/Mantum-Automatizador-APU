@@ -120,10 +120,13 @@ class Settings:
         default_factory=lambda: _get_float("EMBEDDING_THRESHOLD", 0.62)
     )
 
-    # --- Gemini (Vertex AI) para cruces dudosos ---
+    # --- Gemini para cruces dudosos e investigación de precios ---
     use_gemini: bool = field(
         default_factory=lambda: os.getenv("USE_GEMINI", "false").lower() == "true"
     )
+    # API key del Gemini Developer API (forma de auth de este proyecto). Si está
+    # vacía, las clases caen a Vertex AI con ADC.
+    gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     gemini_model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
     gemini_location: str = field(
         default_factory=lambda: os.getenv("GEMINI_LOCATION", os.getenv("GCP_REGION", "us-central1"))

@@ -1,15 +1,19 @@
-"""Resolutor de cruces con Gemini (Vertex AI).
+"""Resolución de cruces e investigación de precios con Gemini.
 
-Se usa como SEGUNDA PASADA solo para ítems donde el fuzzy queda en zona dudosa.
-Para acotar costo/latencia, a Gemini NO se le pasa todo el catálogo: se le pasa
-el ítem del warehouse y una lista corta de candidatos (top-K del fuzzy), y debe
-elegir cuál es el MISMO producto (o NINGUNO), devolviendo índice y confianza.
+Dos clases:
+  - GeminiResolver: segunda pasada para cruces dudosos (elige el mejor candidato).
+  - GeminiPriceResearcher: ÚLTIMO recurso cuando un ítem no tiene ninguna fuente
+    interna; busca un precio de referencia EN INTERNET (grounding Google Search) y
+    devuelve precio + unidad + enlace de la fuente.
 
-Autenticación: usa ADC (la runtime SA de Cloud Run). Requiere:
-  - API aiplatform.googleapis.com habilitada (Terraform la habilita).
-  - Rol roles/aiplatform.user en la runtime SA (Terraform lo concede).
-Es de carga perezosa y FAIL-SOFT: si Vertex no está disponible, devuelve None y
-el pipeline conserva el resultado fuzzy.
+Autenticación (en este orden):
+  1) API KEY del Gemini Developer API vía la variable GEMINI_API_KEY (SDK
+     `google-genai`). Es la forma usada en este proyecto.
+  2) Vertex AI con ADC (la runtime SA de Cloud Run) como respaldo, si no hay key.
+
+Ambas clases son de carga perezosa y FAIL-SOFT: si no hay backend disponible,
+`enabled=False` y los métodos devuelven None (el pipeline conserva el resultado
+del fuzzy / el valor de la BD).
 """
 from __future__ import annotations
 
@@ -19,10 +23,67 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# --------------------------------------------------------------------------- #
+# Construcción de backend (API key google-genai  ó  Vertex AI)                 #
+# --------------------------------------------------------------------------- #
+def _build_backend(api_key, project, location, model_name, use_search):
+    """Devuelve (backend, handle, types_mod). backend ∈ {'genai','vertex',None}.
+
+    - 'genai': handle = (client, model_name); types_mod = google.genai.types
+    - 'vertex': handle = (model, GenerationConfig); types_mod = None
+    """
+    # 1) API key (Gemini Developer API)
+    if api_key:
+        try:
+            from google import genai
+            from google.genai import types as gtypes
+
+            client = genai.Client(api_key=api_key)
+            return "genai", (client, model_name, use_search), gtypes
+        except Exception as exc:  # pragma: no cover
+            print(f"[gemini] API key presente pero SDK google-genai no disponible: {exc}")
+
+    # 2) Vertex AI (ADC)
+    try:
+        import vertexai
+        from vertexai.generative_models import GenerativeModel
+
+        vertexai.init(project=project, location=location)
+        GenerationConfig = __import__(
+            "vertexai.generative_models", fromlist=["GenerationConfig"]
+        ).GenerationConfig
+        tools = None
+        if use_search:
+            from vertexai.generative_models import Tool, grounding
+
+            tools = [Tool.from_google_search_retrieval(grounding.GoogleSearchRetrieval())]
+        model = GenerativeModel(model_name, tools=tools) if tools else GenerativeModel(model_name)
+        return "vertex", (model, GenerationConfig), None
+    except Exception as exc:  # pragma: no cover
+        print(f"[gemini] sin backend disponible (ni API key ni Vertex): {exc}")
+        return None, None, None
+
+
+def _parse_json(text: str) -> Optional[dict]:
+    if not text:
+        return None
+    t = re.sub(r"^```(?:json)?|```$", "", str(text).strip(), flags=re.MULTILINE).strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        m = re.search(r"\{.*\}", t, flags=re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except Exception:
+                return None
+    return None
+
+
 @dataclass
 class GeminiChoice:
-    index: Optional[int]      # índice del candidato elegido, o None
-    confidence: float          # 0-100
+    index: Optional[int]
+    confidence: float
     reason: str
 
 
@@ -48,25 +109,14 @@ class GeminiResolver:
         project: str,
         location: str = "us-central1",
         model_name: str = "gemini-2.0-flash",
+        api_key: Optional[str] = None,
     ) -> None:
-        self.enabled = False
-        self._model = None
-        try:
-            import vertexai
-            from vertexai.generative_models import GenerativeModel
-
-            vertexai.init(project=project, location=location)
-            self._model = GenerativeModel(model_name)
-            self._GenerationConfig = __import__(
-                "vertexai.generative_models", fromlist=["GenerationConfig"]
-            ).GenerationConfig
-            self.enabled = True
-        except Exception as exc:  # pragma: no cover - dependencia/entorno opcional
-            print(f"[gemini] deshabilitado: {exc}")
-            self.enabled = False
+        self._backend, self._handle, self._types = _build_backend(
+            api_key, project, location, model_name, use_search=False
+        )
+        self.enabled = self._backend is not None
 
     def resolve(self, item: str, unit: str, candidates: list[dict]) -> Optional[GeminiChoice]:
-        """candidates: lista de dicts con al menos 'raw' y 'unit'."""
         if not self.enabled or not candidates:
             return None
         listado = "\n".join(
@@ -75,15 +125,8 @@ class GeminiResolver:
         )
         prompt = _PROMPT.format(item=item, unit=unit, candidates=listado)
         try:
-            resp = self._model.generate_content(
-                prompt,
-                generation_config=self._GenerationConfig(
-                    temperature=0.0,
-                    response_mime_type="application/json",
-                    max_output_tokens=256,
-                ),
-            )
-            data = self._parse_json(resp.text)
+            text = self._generate(prompt, json_mode=True, max_tokens=256)
+            data = _parse_json(text)
             if data is None:
                 return None
             idx = data.get("index", None)
@@ -99,37 +142,43 @@ class GeminiResolver:
             print(f"[gemini] error resolviendo '{item[:40]}': {exc}")
             return None
 
-    @staticmethod
-    def _parse_json(text: str) -> Optional[dict]:
-        if not text:
-            return None
-        t = text.strip()
-        # Quita fences ```json ... ``` si aparecen.
-        t = re.sub(r"^```(?:json)?|```$", "", t.strip(), flags=re.MULTILINE).strip()
-        try:
-            return json.loads(t)
-        except Exception:
-            m = re.search(r"\{.*\}", t, flags=re.DOTALL)
-            if m:
-                try:
-                    return json.loads(m.group(0))
-                except Exception:
-                    return None
-        return None
+    def _generate(self, prompt: str, json_mode: bool, max_tokens: int):
+        """Genera texto con el backend activo (sin grounding)."""
+        if self._backend == "genai":
+            client, model_name, _ = self._handle
+            t = self._types
+            kwargs = dict(temperature=0.0, max_output_tokens=max_tokens)
+            if json_mode:
+                kwargs["response_mime_type"] = "application/json"
+            resp = client.models.generate_content(
+                model=model_name, contents=prompt,
+                config=t.GenerateContentConfig(**kwargs),
+            )
+            return getattr(resp, "text", "") or ""
+        # vertex
+        model, GenerationConfig = self._handle
+        kwargs = dict(temperature=0.0, max_output_tokens=max_tokens)
+        if json_mode:
+            kwargs["response_mime_type"] = "application/json"
+        resp = model.generate_content(prompt, generation_config=GenerationConfig(**kwargs))
+        return getattr(resp, "text", "") or ""
+
+    # Compat: algunos tests viejos llaman GeminiResolver._parse_json
+    _parse_json = staticmethod(_parse_json)
 
 
 @dataclass
 class PriceResearch:
-    precio: Optional[float]    # precio de referencia en COP (antes de IVA si es posible)
-    unidad: str                # unidad del precio hallado (p.ej. 'und', 'm', 'kg', 'gl')
-    fuente_url: str            # enlace a la fuente (preferido: grounding de Google)
-    fuente_nombre: str         # nombre/comercio de la fuente
-    confianza: float           # 0-100
+    precio: Optional[float]
+    unidad: str
+    fuente_url: str
+    fuente_nombre: str
+    confianza: float
     notas: str
 
 
 _PRICE_PROMPT = """Eres un experto en precios de insumos de construcción y
-mantenimiento en COLOMBIA (precios en pesos colombianos, COP). Busca en internet
+mantenimiento en COLOMBIA (precios en pesos colombianos, COP). Busca EN INTERNET
 el precio UNITARIO de mercado MÁS REPRESENTATIVO y ACTUAL para el siguiente ítem.
 
 ÍTEM: "{item}"
@@ -141,82 +190,57 @@ Reglas:
 - Si el precio típico incluye IVA, da el valor ANTES de IVA si puedes estimarlo;
   si no, deja el precio tal cual y acláralo en "notas".
 - Prefiere fuentes colombianas (Homecenter/Sodimac, Constructor, Ferreterías,
-  catálogos de fabricante, marketplaces locales).
+  catálogos de fabricante, marketplaces locales). Incluye el enlace.
 - Si NO encuentras un precio creíble, responde precio = null.
 
-Responde SOLO un JSON válido, sin texto extra:
+Responde al final SOLO un JSON válido con esta forma (sin texto extra después):
 {{"precio": <número COP o null>, "unidad": "<unidad>", "fuente_url": "<enlace>",
   "fuente_nombre": "<comercio/fuente>", "confidence": <0-100>, "notas": "<breve>"}}
 """
 
 
 class GeminiPriceResearcher:
-    """Busca un precio de referencia en internet usando Gemini con grounding de
-    Google Search (Vertex AI). Se usa como ÚLTIMO recurso cuando un ítem no tiene
-    ninguna fuente interna (consolidado/comparativo) que refute su precio.
-
-    FAIL-SOFT: si Vertex AI o el grounding no están disponibles, `enabled=False`
-    y `research_price` devuelve None (el pipeline conserva el valor de la BD).
-    """
+    """Busca un precio de referencia en internet con Gemini + Google Search."""
 
     def __init__(
         self,
         project: str,
         location: str = "us-central1",
         model_name: str = "gemini-2.0-flash",
+        api_key: Optional[str] = None,
     ) -> None:
-        self.enabled = False
-        self._model = None
-        self._GenerationConfig = None
         self._cache: dict[str, Optional[PriceResearch]] = {}
-        try:
-            import vertexai
-            from vertexai.generative_models import GenerativeModel, Tool, grounding
-
-            vertexai.init(project=project, location=location)
-            # Herramienta de grounding con Google Search (permite citar enlaces).
-            search_tool = Tool.from_google_search_retrieval(
-                grounding.GoogleSearchRetrieval()
-            )
-            self._model = GenerativeModel(model_name, tools=[search_tool])
-            self._GenerationConfig = __import__(
-                "vertexai.generative_models", fromlist=["GenerationConfig"]
-            ).GenerationConfig
-            self.enabled = True
-        except Exception as exc:  # pragma: no cover - dependencia/entorno opcional
-            print(f"[gemini-precio] deshabilitado: {exc}")
-            self.enabled = False
+        self._backend, self._handle, self._types = _build_backend(
+            api_key, project, location, model_name, use_search=True
+        )
+        self.enabled = self._backend is not None
 
     @staticmethod
     def _to_cop(value) -> Optional[float]:
-        """Normaliza un precio devuelto por Gemini a float COP. Acepta número o
-        cadena tipo '$ 12.500' / '12,500' / '12500.0'."""
+        """Normaliza un precio a float COP. Acepta número o cadena tipo
+        '$ 12.500' / '12,500' / '12500.0' / '$1.078.250'. Convención CO: el punto
+        suele ser separador de MILES y la coma, decimal."""
         if value is None:
             return None
         if isinstance(value, (int, float)):
             v = float(value)
             return v if v > 0 else None
         raw = str(value)
-        # Primer token que contenga dígitos (evita que '/m2', 'COP', etc. peguen
-        # cifras espurias al número).
         tok = next((t for t in re.split(r"\s+", raw) if re.search(r"\d", t)), raw)
         s = re.sub(r"[^\d,.\-]", "", tok)
         if not s:
             return None
         has_dot, has_comma = "." in s, "," in s
         if has_dot and has_comma:
-            # punto = miles, coma = decimal (convención CO)
             s = s.replace(".", "").replace(",", ".")
         elif has_comma:
             ent, _, dec = s.rpartition(",")
             s = (ent + "." + dec) if len(dec) in (1, 2) else (ent + dec)
         elif has_dot:
             if s.count(".") > 1:
-                s = s.replace(".", "")  # varios puntos => miles (1.078.250)
+                s = s.replace(".", "")
             else:
                 ent, _, dec = s.rpartition(".")
-                # 3 dígitos tras el punto => miles (12.500 -> 12500);
-                # 1-2 dígitos => decimal real (12500.0 -> 12500.0).
                 s = (ent + dec) if len(dec) == 3 else (ent + "." + dec)
         try:
             v = float(s)
@@ -225,7 +249,7 @@ class GeminiPriceResearcher:
             return None
 
     def _grounding_url(self, resp) -> Optional[str]:
-        """Extrae el primer enlace de las citas de grounding, si las hay."""
+        """Primer enlace de las citas de grounding (formato genai o vertex)."""
         try:
             cand = resp.candidates[0]
             gm = getattr(cand, "grounding_metadata", None)
@@ -239,6 +263,27 @@ class GeminiPriceResearcher:
             pass
         return None
 
+    def _generate_grounded(self, prompt: str):
+        """Genera con grounding de Google Search. Devuelve (text, resp)."""
+        if self._backend == "genai":
+            client, model_name, _ = self._handle
+            t = self._types
+            resp = client.models.generate_content(
+                model=model_name, contents=prompt,
+                config=t.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=512,
+                    tools=[t.Tool(google_search=t.GoogleSearch())],
+                ),
+            )
+            return getattr(resp, "text", "") or "", resp
+        # vertex (la tool ya se inyectó en el modelo)
+        model, GenerationConfig = self._handle
+        resp = model.generate_content(
+            prompt, generation_config=GenerationConfig(temperature=0.0, max_output_tokens=512)
+        )
+        return getattr(resp, "text", "") or "", resp
+
     def research_price(self, item: str, unit: str = "") -> Optional[PriceResearch]:
         if not self.enabled or not str(item).strip():
             return None
@@ -248,13 +293,8 @@ class GeminiPriceResearcher:
         prompt = _PRICE_PROMPT.format(item=item, unit=unit or "")
         result: Optional[PriceResearch] = None
         try:
-            # No se fuerza response_mime_type=json porque es incompatible con el
-            # grounding de Google Search; se parsea el JSON del texto.
-            resp = self._model.generate_content(
-                prompt,
-                generation_config=self._GenerationConfig(temperature=0.0, max_output_tokens=512),
-            )
-            data = GeminiResolver._parse_json(getattr(resp, "text", "") or "")
+            text, resp = self._generate_grounded(prompt)
+            data = _parse_json(text)
             if data is not None:
                 precio = self._to_cop(data.get("precio"))
                 if precio is not None:

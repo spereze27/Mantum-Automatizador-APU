@@ -24,3 +24,5 @@ python-Levenshtein==0.25.1
 
 # --- Gemini / Vertex AI (OPCIONAL: solo si USE_GEMINI=true) ---
 google-cloud-aiplatform==1.71.1
+# SDK del Gemini Developer API (auth por GEMINI_API_KEY, con Google Search grounding)
+google-genai==1.21.1

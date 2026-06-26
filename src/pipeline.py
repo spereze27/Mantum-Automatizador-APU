@@ -288,6 +288,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             project=settings.gcp_project_id,
             location=settings.gemini_location,
             model_name=settings.gemini_model,
+            api_key=settings.gemini_api_key or None,
         )
         if not gemini.enabled:
             gemini = None
@@ -302,6 +303,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             project=settings.gcp_project_id,
             location=settings.gemini_location,
             model_name=settings.gemini_model,
+            api_key=settings.gemini_api_key or None,
         )
         if not gemini_price.enabled:
             gemini_price = None
