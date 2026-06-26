@@ -108,7 +108,7 @@ class GeminiResolver:
         self,
         project: str,
         location: str = "us-central1",
-        model_name: str = "gemini-2.0-flash",
+        model_name: str = "gemini-2.5-flash",
         api_key: Optional[str] = None,
     ) -> None:
         self._backend, self._handle, self._types = _build_backend(
@@ -206,7 +206,7 @@ class GeminiPriceResearcher:
         self,
         project: str,
         location: str = "us-central1",
-        model_name: str = "gemini-2.0-flash",
+        model_name: str = "gemini-2.5-flash",
         api_key: Optional[str] = None,
     ) -> None:
         self._cache: dict[str, Optional[PriceResearch]] = {}
