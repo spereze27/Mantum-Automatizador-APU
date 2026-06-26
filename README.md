@@ -142,3 +142,13 @@ pytest -q
   aplica un piso de precio para descartar ruido.
 - **Workload Identity Federation** es la alternativa recomendada a la clave JSON
   para CI/CD (el workflow ya pide `id-token: write`).
+- **Fallback de precio en internet (Gemini)**: con
+  `USE_GEMINI_PRICE_RESEARCH=true`, los ítems activos que NO encuentran ninguna
+  fuente interna (consolidado/comparativo) que refute su precio se consultan a
+  Gemini con *grounding* de Google Search; el precio de referencia hallado (con su
+  unidad) queda en `precio_referencia`/`como_se_calculo` y el enlace de la fuente
+  en `fuente_que_refuta`/`enlace_fuente`. Controles: `GEMINI_PRICE_MAX_ITEMS`
+  (tope de ítems por corrida) y `GEMINI_PRICE_MIN_CONFIDENCE`. La guardia de >50%
+  evita auto-aplicar precios web muy distintos de la BD, pero el precio y el enlace
+  quedan visibles en el reporte para revisión. Requiere la API `aiplatform`
+  habilitada y rol `roles/aiplatform.user` en la SA runtime (ya en Terraform).

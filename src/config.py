@@ -139,6 +139,24 @@ class Settings:
         default_factory=lambda: int(os.getenv("GEMINI_MIN_CONFIDENCE", "70"))
     )
 
+    # --- Gemini: investigación de precio en internet (fallback sin fuente) ---
+    # Cuando un ítem activo NO encuentra ninguna fuente interna (consolidado ni
+    # comparativo) que refute su precio, se le pide a Gemini (con grounding de
+    # Google Search) un precio de referencia de mercado + unidad + enlace de la
+    # fuente. El resultado se registra como referencia y el enlace queda en
+    # 'fuente_que_refuta'. Es FAIL-SOFT: si Vertex/grounding no está, se omite.
+    use_gemini_price_research: bool = field(
+        default_factory=lambda: os.getenv("USE_GEMINI_PRICE_RESEARCH", "false").lower() == "true"
+    )
+    # Tope de ítems a investigar por corrida (controla costo/latencia).
+    gemini_price_max_items: int = field(
+        default_factory=lambda: int(os.getenv("GEMINI_PRICE_MAX_ITEMS", "80"))
+    )
+    # Confianza mínima (0-100) de Gemini para aceptar el precio web hallado.
+    gemini_price_min_confidence: int = field(
+        default_factory=lambda: int(os.getenv("GEMINI_PRICE_MIN_CONFIDENCE", "60"))
+    )
+
     # --- Comparativos config ---
     comparativos_config_path: str = field(
         default_factory=lambda: os.getenv("COMPARATIVOS_CONFIG_PATH", "config/comparativos_config.yaml")

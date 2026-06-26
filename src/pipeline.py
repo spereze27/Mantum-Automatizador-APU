@@ -292,6 +292,21 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         if not gemini.enabled:
             gemini = None
 
+    # Investigador opcional de precio en internet (fallback cuando NO hay fuente
+    # interna que refute). Usa grounding de Google Search vía Vertex AI.
+    gemini_price = None
+    if settings.use_gemini_price_research:
+        from .gemini_mapper import GeminiPriceResearcher
+
+        gemini_price = GeminiPriceResearcher(
+            project=settings.gcp_project_id,
+            location=settings.gemini_location,
+            model_name=settings.gemini_model,
+        )
+        if not gemini_price.enabled:
+            gemini_price = None
+    n_price_research = 0  # ítems ya investigados en esta corrida (tope de costo)
+
     # Índice por ítem normalizado; conserva el tipo de fuente para separar
     # cotizaciones (comparativos) del gasto real (Consolidado).
     comp = comparativos.copy()
@@ -502,6 +517,7 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
         #     (la BD sirve de ancla de cordura: en insumos dispersos como
         #     Transporte el máximo es el más parecido; en otros lo es el promedio).
         #   - Si NO hay consolidado: promedio del comparativo excluyendo outliers.
+        ref_es_web = False  # True solo si la referencia vino de investigación web
         if precio_cons_max is not None:
             cand = {"PROMEDIO": precio_cons_prom, "MÁXIMO": precio_cons_max}
             cand = {k: v for k, v in cand.items() if v is not None}
@@ -544,13 +560,46 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
             else:
                 de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
+            # --- FALLBACK: investigación de precio en internet con Gemini ---
+            # Solo cuando NO hubo ninguna fuente interna que refute. Pide a Gemini
+            # (grounding Google Search) un precio de referencia + unidad + enlace.
+            if (
+                gemini_price is not None
+                and matched
+                and n_price_research < settings.gemini_price_max_items
+            ):
+                pr = gemini_price.research_price(desc, und)
+                n_price_research += 1
+                if (
+                    pr is not None
+                    and pr.precio
+                    and pr.precio > 0
+                    and pr.confianza >= settings.gemini_price_min_confidence
+                ):
+                    precio_ref = round(float(pr.precio), 2)
+                    ref_es_web = True
+                    unidad_txt = f" / {pr.unidad}" if pr.unidad else ""
+                    tipo_ref = f"Investigación web (Gemini){(' · unidad ' + pr.unidad) if pr.unidad else ''}"
+                    fuente_ref = pr.fuente_nombre or "Referencia web"
+                    link_ref = pr.fuente_url or ""
+                    region_ref = "Internet"
+                    prov_ref = pr.fuente_nombre or ""
+                    de_donde = (
+                        f"Sin fuente interna; precio de referencia hallado en internet por "
+                        f"Gemini: {_cop(precio_ref)}{unidad_txt} (confianza {pr.confianza:.0f}). "
+                        f"Fuente: {pr.fuente_url or 's/d'}."
+                        + (f" Nota: {pr.notas}" if pr.notas else "")
+                    )
+
         # (La referencia ya usa solo el consolidado cuando existe, así que no hay
         # mezcla de fuentes que reconciliar.)
 
         # Guardia de cordura por magnitud: descarta referencias desproporcionadas
-        # (p.ej. una tarifa por m2 cruzada contra un 'MANO DE OBRA' global).
+        # (p.ej. una tarifa por m2 cruzada contra un 'MANO DE OBRA' global). NO se
+        # aplica a referencias web: ahí se conserva el precio + enlace para que sean
+        # visibles, y el control de >50% más abajo evita el auto-update si difiere.
         descartado_magnitud = False
-        if precio_ref is not None and valor_wh_proj:
+        if precio_ref is not None and valor_wh_proj and not ref_es_web:
             ratio = precio_ref / valor_wh_proj
             extremo = ratio > settings.extreme_ratio or ratio < 1.0 / settings.extreme_ratio
             if ratio > settings.max_price_ratio or ratio < 1.0 / settings.max_price_ratio:
