@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import math
 import os
+import threading
+import time
+import uuid
 from dataclasses import asdict
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -22,7 +25,36 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from .config import get_settings
 from .pipeline import run_pipeline
 
-app = FastAPI(title="Mantum Automatizador APU", version="2.0.0")
+app = FastAPI(title="Mantum Automatizador APU", version="2.1.0")
+
+# --- Estado del trabajo en segundo plano (instancia única) ---------------- #
+# El pipeline puede tardar varios minutos (sobre todo con Gemini activo), más
+# de lo que aguanta el navegador/proxy. Por eso /run lo ejecuta en un hilo y
+# responde de inmediato; el front consulta /status por sondeo. Requiere que
+# Cloud Run NO limite la CPU fuera de las requests: desplegar con
+# --no-cpu-throttling y --max-instances 1 (ver deploy.yml).
+_JOB: dict = {
+    "id": None, "status": "idle", "result": None, "error": None,
+    "started": None, "finished": None,
+}
+_JOB_LOCK = threading.Lock()
+
+
+def _run_job(settings, job_id: str) -> None:
+    try:
+        result = run_pipeline(settings)
+        payload = _json_safe(asdict(result))
+        with _JOB_LOCK:
+            if _JOB["id"] == job_id:
+                _JOB["result"] = payload
+                _JOB["status"] = "done_with_errors" if result.errors else "done"
+                _JOB["finished"] = time.time()
+    except Exception as exc:  # noqa: BLE001
+        with _JOB_LOCK:
+            if _JOB["id"] == job_id:
+                _JOB["error"] = str(exc)
+                _JOB["status"] = "error"
+                _JOB["finished"] = time.time()
 
 
 def _json_safe(o):
@@ -81,28 +113,38 @@ async def run(request: Request):
     if isinstance(body, dict) and ("dry_run" in body or "modo" in body or "ipc" in body or "smlv" in body):
         get_settings.cache_clear()
         settings = get_settings()
-    try:
-        result = run_pipeline(settings)
-    except Exception as exc:
-        # Devuelve el error de forma estructurada para que la UI lo muestre
-        # (en vez de un 500 opaco).
-        return JSONResponse(status_code=200, content={
-            "stats": {}, "errors": [f"Fallo del pipeline: {exc}"],
-            "bucket": settings.gcs_bucket_name,
-            "input_prefix": settings.gcs_input_prefix,
-            "consolidado_prefix": settings.gcs_consolidado_prefix,
-            "comparativos_filas": 0, "rows_warehouse": None,
-            "insumos_evaluados": None, "celdas_actualizadas": None,
+
+    # Lanza el pipeline en segundo plano y responde de inmediato (202).
+    with _JOB_LOCK:
+        if _JOB["status"] == "running":
+            return JSONResponse(status_code=202, content={
+                "job_id": _JOB["id"], "status": "running",
+                "message": "Ya hay una ejecución en curso.",
+            })
+        job_id = uuid.uuid4().hex[:8]
+        _JOB.update({
+            "id": job_id, "status": "running", "result": None, "error": None,
+            "started": time.time(), "finished": None,
         })
-    status_code = 200 if not result.errors else 207
-    try:
-        return JSONResponse(status_code=status_code, content=_json_safe(asdict(result)))
-    except Exception as exc:
-        # Último recurso: nunca devolver HTML 500 al navegador.
-        return JSONResponse(status_code=200, content={
-            "errors": [f"Error serializando la respuesta: {exc}"],
-            "celdas_actualizadas": 0,
-        })
+    threading.Thread(target=_run_job, args=(settings, job_id), daemon=True).start()
+    return JSONResponse(status_code=202, content={"job_id": job_id, "status": "running"})
+
+
+@app.get("/status")
+def status():
+    """Estado del trabajo en curso. Cuando termina, incluye 'data' con el mismo
+    payload que antes devolvía /run (para que el front renderice igual)."""
+    with _JOB_LOCK:
+        j = dict(_JOB)
+    started = j.get("started")
+    finished = j.get("finished")
+    elapsed = int((finished or time.time()) - started) if started else 0
+    payload = {"status": j["status"], "job_id": j["id"], "elapsed": elapsed}
+    if j["status"] in ("done", "done_with_errors") and j["result"] is not None:
+        payload["data"] = j["result"]
+    if j["status"] == "error":
+        payload["error"] = j.get("error") or "error desconocido"
+    return JSONResponse(status_code=200, content=payload)
 
 
 @app.get("/report/latest")
@@ -288,16 +330,44 @@ async function run(){
   const modo=document.getElementById('modo').value;
   const ipc=parseFloat(document.getElementById('ipc').value||'0')/100;
   const smlv=parseFloat(document.getElementById('smlv').value||'0')/100;
-  setStatus('Analizando fuentes, cruzando ítems y proyectando precios… (puede tardar 1–3 min)');
+  setStatus('Iniciando ejecución en segundo plano…');
   try{
     const r=await fetch('/run',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({dry_run:dry, modo:modo, ipc:ipc, smlv:smlv})});
-    const d=await r.json();
-    render(d);
-    setStatus('✅ Listo. '+(d.dry_run?'(modo auditoría: no se escribió el Sheet)':'Warehouse actualizado.'),false,false);
-  }catch(e){ setStatus('❌ Error: '+e.message,true,false); }
-  btn.disabled=false;
+    const j=await r.json();
+    if(j && j.error){ setStatus('❌ Error: '+j.error,true,false); btn.disabled=false; return; }
+    poll();  // empieza a sondear /status
+  }catch(e){ setStatus('❌ Error: '+e.message,true,false); btn.disabled=false; }
 }
+function fmtElapsed(s){ s=Number(s)||0; const m=Math.floor(s/60), r=s%60; return m?`${m}m ${r}s`:`${r}s`; }
+async function poll(){
+  try{
+    const r=await fetch('/status'); const j=await r.json();
+    if(j.status==='running'){
+      setStatus('Procesando en segundo plano… ('+fmtElapsed(j.elapsed)+'). '+
+                'Puede tardar varios minutos si Gemini está activo. Puedes dejar esta pestaña abierta.');
+      setTimeout(poll, 4000); return;
+    }
+    if(j.status==='error'){
+      setStatus('❌ Error del pipeline: '+(j.error||'desconocido'),true,false);
+      document.getElementById('go').disabled=false; return;
+    }
+    if(j.status==='done' || j.status==='done_with_errors'){
+      const d=j.data||{};
+      render(d);
+      setStatus('✅ Listo en '+fmtElapsed(j.elapsed)+'. '+
+                (d.dry_run?'(modo auditoría: no se escribió el Sheet)':'Warehouse actualizado.'),false,false);
+      document.getElementById('go').disabled=false; return;
+    }
+    // idle u otro estado: reintenta
+    setTimeout(poll, 4000);
+  }catch(e){ setStatus('Reintentando consulta de estado…'); setTimeout(poll, 5000); }
+}
+// Si se recarga la página con una ejecución en curso, reanuda el sondeo.
+window.addEventListener('load', async ()=>{
+  try{ const r=await fetch('/status'); const j=await r.json();
+    if(j && (j.status==='running')){ document.getElementById('go').disabled=true; poll(); } }catch(e){}
+});
 function card(label,value,sub,cls){return `<div class="card ${cls||''}">
   <div class="label">${label}</div><div class="value">${value}</div>
   ${sub?`<div class="sub">${sub}</div>`:''}</div>`}
