@@ -2,18 +2,21 @@
 
 Dos clases:
   - GeminiResolver: segunda pasada para cruces dudosos (elige el mejor candidato).
-  - GeminiPriceResearcher: ÚLTIMO recurso cuando un ítem no tiene ninguna fuente
-    interna; busca un precio de referencia EN INTERNET (grounding Google Search) y
-    devuelve precio + unidad + enlace de la fuente.
+  - GeminiPriceResearcher: ÚLTIMO recurso cuando un ítem no tiene fuente interna o
+    cuando TODAS las fuentes quedaron fuera del rango de cordura; busca un precio de
+    referencia EN INTERNET (grounding Google Search) y devuelve precio + unidad +
+    ENLACE de la fuente.
 
-Autenticación (en este orden):
-  1) API KEY del Gemini Developer API vía la variable GEMINI_API_KEY (SDK
-     `google-genai`). Es la forma usada en este proyecto.
-  2) Vertex AI con ADC (la runtime SA de Cloud Run) como respaldo, si no hay key.
+Backend unificado con el SDK `google-genai` (un solo camino de código):
+  1) Si hay GEMINI_API_KEY  -> Client(api_key=...)            (Gemini Developer API)
+  2) Si NO hay api_key       -> Client(vertexai=True, project, location)  (Vertex AI
+     con ADC = la service account con la que corre Cloud Run; requiere el rol
+     roles/aiplatform.user y la API aiplatform habilitada).
+El grounding de Google Search es idéntico en ambos modos.
 
-Ambas clases son de carga perezosa y FAIL-SOFT: si no hay backend disponible,
-`enabled=False` y los métodos devuelven None (el pipeline conserva el resultado
-del fuzzy / el valor de la BD).
+Ambas clases son FAIL-SOFT (si no hay backend, enabled=False y devuelven None) y
+tienen un circuit breaker: tras 3 fallos seguidos (p.ej. sin cuota) se apagan por
+el resto de la corrida para no inflar el tiempo del pipeline.
 """
 from __future__ import annotations
 
@@ -24,51 +27,40 @@ from typing import Optional
 
 
 # --------------------------------------------------------------------------- #
-# Construcción de backend (API key google-genai  ó  Vertex AI)                 #
+# Backend unificado (google-genai: API key  ó  Vertex AI/ADC)                  #
 # --------------------------------------------------------------------------- #
-def _build_backend(api_key, project, location, model_name, use_search):
-    """Devuelve (backend, handle, types_mod). backend ∈ {'genai','vertex',None}.
-
-    - 'genai': handle = (client, model_name); types_mod = google.genai.types
-    - 'vertex': handle = (model, GenerationConfig); types_mod = None
-    """
-    # 1) API key (Gemini Developer API)
-    if api_key:
-        try:
-            from google import genai
-            from google.genai import types as gtypes
-
-            # Timeout corto y SIN reintentos: si no hay cuota (429) o hay un error,
-            # que falle RÁPIDO. Así un corte de cuota no infla el tiempo del
-            # pipeline con esperas exponenciales (lo combinamos con un circuit
-            # breaker en cada clase que apaga Gemini tras varios fallos seguidos).
-            http = gtypes.HttpOptions(
-                timeout=20000,  # ms
-                retry_options=gtypes.HttpRetryOptions(attempts=1),
-            )
-            client = genai.Client(api_key=api_key, http_options=http)
-            return "genai", (client, model_name, use_search), gtypes
-        except Exception as exc:  # pragma: no cover
-            print(f"[gemini] API key presente pero SDK google-genai no disponible: {exc}")
-
-    # 2) Vertex AI (ADC)
+def _build_backend(api_key, project, location, model_name):
+    """Devuelve (client, model_name, types_mod) o (None, None, None)."""
     try:
-        import vertexai
-        from vertexai.generative_models import GenerativeModel
-
-        vertexai.init(project=project, location=location)
-        GenerationConfig = __import__(
-            "vertexai.generative_models", fromlist=["GenerationConfig"]
-        ).GenerationConfig
-        tools = None
-        if use_search:
-            from vertexai.generative_models import Tool, grounding
-
-            tools = [Tool.from_google_search_retrieval(grounding.GoogleSearchRetrieval())]
-        model = GenerativeModel(model_name, tools=tools) if tools else GenerativeModel(model_name)
-        return "vertex", (model, GenerationConfig), None
+        from google import genai
+        from google.genai import types as gtypes
     except Exception as exc:  # pragma: no cover
-        print(f"[gemini] sin backend disponible (ni API key ni Vertex): {exc}")
+        print(f"[gemini] SDK google-genai no disponible: {exc}")
+        return None, None, None
+
+    # Timeout corto y SIN reintentos: si no hay cuota (429) o hay error, que falle
+    # RÁPIDO (lo combinamos con el circuit breaker de cada clase).
+    try:
+        http = gtypes.HttpOptions(
+            timeout=20000,  # ms
+            retry_options=gtypes.HttpRetryOptions(attempts=1),
+        )
+    except Exception:  # versiones viejas del SDK sin esos campos
+        http = None
+
+    try:
+        if api_key:
+            client = genai.Client(api_key=api_key, http_options=http) if http else genai.Client(api_key=api_key)
+            print("[gemini] backend: API key (Gemini Developer API)")
+        else:
+            kwargs = dict(vertexai=True, project=project, location=location)
+            if http:
+                kwargs["http_options"] = http
+            client = genai.Client(**kwargs)
+            print(f"[gemini] backend: Vertex AI (ADC) project={project} location={location}")
+        return client, model_name, gtypes
+    except Exception as exc:  # pragma: no cover
+        print(f"[gemini] no se pudo inicializar el cliente: {exc}")
         return None, None, None
 
 
@@ -85,6 +77,22 @@ def _parse_json(text: str) -> Optional[dict]:
                 return json.loads(m.group(0))
             except Exception:
                 return None
+    return None
+
+
+def _grounding_url(resp) -> Optional[str]:
+    """Primer enlace de las citas de grounding de Google Search."""
+    try:
+        cand = resp.candidates[0]
+        gm = getattr(cand, "grounding_metadata", None)
+        chunks = getattr(gm, "grounding_chunks", None) or []
+        for ch in chunks:
+            web = getattr(ch, "web", None)
+            uri = getattr(web, "uri", None) if web else None
+            if uri:
+                return uri
+    except Exception:
+        pass
     return None
 
 
@@ -119,12 +127,12 @@ class GeminiResolver:
         model_name: str = "gemini-2.5-flash",
         api_key: Optional[str] = None,
     ) -> None:
-        self._backend, self._handle, self._types = _build_backend(
-            api_key, project, location, model_name, use_search=False
+        self._client, self._model_name, self._types = _build_backend(
+            api_key, project, location, model_name
         )
-        self.enabled = self._backend is not None
+        self.enabled = self._client is not None
         self._fail_streak = 0
-        self._max_fails = 3  # tras N fallos seguidos, se apaga por el resto de la corrida
+        self._max_fails = 3
 
     def resolve(self, item: str, unit: str, candidates: list[dict]) -> Optional[GeminiChoice]:
         if not self.enabled or not candidates:
@@ -135,9 +143,17 @@ class GeminiResolver:
         )
         prompt = _PROMPT.format(item=item, unit=unit, candidates=listado)
         try:
-            text = self._generate(prompt, json_mode=True, max_tokens=256)
+            t = self._types
+            resp = self._client.models.generate_content(
+                model=self._model_name, contents=prompt,
+                config=t.GenerateContentConfig(
+                    temperature=0.0, max_output_tokens=256,
+                    response_mime_type="application/json",
+                ),
+            )
+            text = getattr(resp, "text", "") or ""
             data = _parse_json(text)
-            self._fail_streak = 0  # éxito: reinicia el contador
+            self._fail_streak = 0
             if data is None:
                 return None
             idx = data.get("index", None)
@@ -155,32 +171,10 @@ class GeminiResolver:
             if self._fail_streak >= self._max_fails:
                 self.enabled = False
                 print(f"[gemini] DESHABILITADO tras {self._fail_streak} fallos seguidos "
-                      f"(¿sin cuota / API key sin créditos?). El resto de la corrida "
+                      f"(¿sin cuota / sin permiso aiplatform?). El resto de la corrida "
                       f"continúa SIN Gemini.")
             return None
 
-    def _generate(self, prompt: str, json_mode: bool, max_tokens: int):
-        """Genera texto con el backend activo (sin grounding)."""
-        if self._backend == "genai":
-            client, model_name, _ = self._handle
-            t = self._types
-            kwargs = dict(temperature=0.0, max_output_tokens=max_tokens)
-            if json_mode:
-                kwargs["response_mime_type"] = "application/json"
-            resp = client.models.generate_content(
-                model=model_name, contents=prompt,
-                config=t.GenerateContentConfig(**kwargs),
-            )
-            return getattr(resp, "text", "") or ""
-        # vertex
-        model, GenerationConfig = self._handle
-        kwargs = dict(temperature=0.0, max_output_tokens=max_tokens)
-        if json_mode:
-            kwargs["response_mime_type"] = "application/json"
-        resp = model.generate_content(prompt, generation_config=GenerationConfig(**kwargs))
-        return getattr(resp, "text", "") or ""
-
-    # Compat: algunos tests viejos llaman GeminiResolver._parse_json
     _parse_json = staticmethod(_parse_json)
 
 
@@ -207,7 +201,7 @@ Reglas:
 - Si el precio típico incluye IVA, da el valor ANTES de IVA si puedes estimarlo;
   si no, deja el precio tal cual y acláralo en "notas".
 - Prefiere fuentes colombianas (Homecenter/Sodimac, Constructor, Ferreterías,
-  catálogos de fabricante, marketplaces locales). Incluye el enlace.
+  catálogos de fabricante, marketplaces locales). INCLUYE EL ENLACE de la fuente.
 - Si NO encuentras un precio creíble, responde precio = null.
 
 Responde al final SOLO un JSON válido con esta forma (sin texto extra después):
@@ -227,12 +221,12 @@ class GeminiPriceResearcher:
         api_key: Optional[str] = None,
     ) -> None:
         self._cache: dict[str, Optional[PriceResearch]] = {}
-        self._backend, self._handle, self._types = _build_backend(
-            api_key, project, location, model_name, use_search=True
+        self._client, self._model_name, self._types = _build_backend(
+            api_key, project, location, model_name
         )
-        self.enabled = self._backend is not None
+        self.enabled = self._client is not None
         self._fail_streak = 0
-        self._max_fails = 3  # tras N fallos seguidos, se apaga por el resto de la corrida
+        self._max_fails = 3
 
     @staticmethod
     def _to_cop(value) -> Optional[float]:
@@ -267,42 +261,6 @@ class GeminiPriceResearcher:
         except ValueError:
             return None
 
-    def _grounding_url(self, resp) -> Optional[str]:
-        """Primer enlace de las citas de grounding (formato genai o vertex)."""
-        try:
-            cand = resp.candidates[0]
-            gm = getattr(cand, "grounding_metadata", None)
-            chunks = getattr(gm, "grounding_chunks", None) or []
-            for ch in chunks:
-                web = getattr(ch, "web", None)
-                uri = getattr(web, "uri", None) if web else None
-                if uri:
-                    return uri
-        except Exception:
-            pass
-        return None
-
-    def _generate_grounded(self, prompt: str):
-        """Genera con grounding de Google Search. Devuelve (text, resp)."""
-        if self._backend == "genai":
-            client, model_name, _ = self._handle
-            t = self._types
-            resp = client.models.generate_content(
-                model=model_name, contents=prompt,
-                config=t.GenerateContentConfig(
-                    temperature=0.0,
-                    max_output_tokens=512,
-                    tools=[t.Tool(google_search=t.GoogleSearch())],
-                ),
-            )
-            return getattr(resp, "text", "") or "", resp
-        # vertex (la tool ya se inyectó en el modelo)
-        model, GenerationConfig = self._handle
-        resp = model.generate_content(
-            prompt, generation_config=GenerationConfig(temperature=0.0, max_output_tokens=512)
-        )
-        return getattr(resp, "text", "") or "", resp
-
     def research_price(self, item: str, unit: str = "") -> Optional[PriceResearch]:
         if not self.enabled or not str(item).strip():
             return None
@@ -312,13 +270,21 @@ class GeminiPriceResearcher:
         prompt = _PRICE_PROMPT.format(item=item, unit=unit or "")
         result: Optional[PriceResearch] = None
         try:
-            text, resp = self._generate_grounded(prompt)
-            self._fail_streak = 0  # éxito: reinicia el contador
+            t = self._types
+            resp = self._client.models.generate_content(
+                model=self._model_name, contents=prompt,
+                config=t.GenerateContentConfig(
+                    temperature=0.0, max_output_tokens=512,
+                    tools=[t.Tool(google_search=t.GoogleSearch())],
+                ),
+            )
+            text = getattr(resp, "text", "") or ""
+            self._fail_streak = 0
             data = _parse_json(text)
             if data is not None:
                 precio = self._to_cop(data.get("precio"))
                 if precio is not None:
-                    url = self._grounding_url(resp) or str(data.get("fuente_url", "") or "")
+                    url = _grounding_url(resp) or str(data.get("fuente_url", "") or "")
                     result = PriceResearch(
                         precio=precio,
                         unidad=str(data.get("unidad", "") or unit or "").strip(),
@@ -333,8 +299,7 @@ class GeminiPriceResearcher:
             if self._fail_streak >= self._max_fails:
                 self.enabled = False
                 print(f"[gemini-precio] DESHABILITADO tras {self._fail_streak} fallos "
-                      f"seguidos (¿sin cuota?). El resto de la corrida continúa sin "
-                      f"investigación web.")
+                      f"seguidos (¿sin cuota / sin permiso aiplatform?).")
             result = None
         self._cache[key] = result
         return result

@@ -9,7 +9,7 @@ from typing import Optional
 
 
 def ipc_factor(ipc_variation: float) -> float:
-    """Devuelve el multiplicador. Ej: variacion 0.0528->1.0528."""
+    """Devuelve el multiplicador. Ej: variacion 0.0528 -> 1.0528."""
     return 1.0 + float(ipc_variation)
 
 

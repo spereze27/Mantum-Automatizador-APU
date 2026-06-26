@@ -563,11 +563,14 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                 de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
             # --- FALLBACK: investigación de precio en internet con Gemini ---
-            # Solo cuando NO hubo ninguna fuente interna que refute. Pide a Gemini
-            # (grounding Google Search) un precio de referencia + unidad + enlace.
+            # Se dispara SIEMPRE que no haya referencia interna, en sus DOS casos:
+            #   (a) no hubo ninguna coincidencia interna (matched=False o sin
+            #       registros), y
+            #   (b) hubo coincidencias pero TODAS quedaron fuera del rango de
+            #       cordura (n_con_fuera + n_cot_fuera > 0).
+            # En ambos adjunta el precio hallado + unidad y el ENLACE de la fuente.
             if (
                 gemini_price is not None
-                and matched
                 and n_price_research < settings.gemini_price_max_items
             ):
                 pr = gemini_price.research_price(desc, und)
@@ -578,6 +581,10 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                     and pr.precio > 0
                     and pr.confianza >= settings.gemini_price_min_confidence
                 ):
+                    fuera_txt = ""
+                    if (n_con_fuera + n_cot_fuera) > 0 and lo_band is not None:
+                        fuera_txt = (f" Las {n_con_fuera + n_cot_fuera} fuente(s) internas "
+                                     f"quedaron fuera del rango [{_cop(lo_band)} , {_cop(hi_band)}].")
                     precio_ref = round(float(pr.precio), 2)
                     ref_es_web = True
                     unidad_txt = f" / {pr.unidad}" if pr.unidad else ""
@@ -587,9 +594,9 @@ def run_pipeline(settings: Settings, storage_client=None) -> PipelineResult:
                     region_ref = "Internet"
                     prov_ref = pr.fuente_nombre or ""
                     de_donde = (
-                        f"Sin fuente interna; precio de referencia hallado en internet por "
-                        f"Gemini: {_cop(precio_ref)}{unidad_txt} (confianza {pr.confianza:.0f}). "
-                        f"Fuente: {pr.fuente_url or 's/d'}."
+                        f"Sin fuente interna utilizable.{fuera_txt} Precio de referencia "
+                        f"hallado en internet por Gemini: {_cop(precio_ref)}{unidad_txt} "
+                        f"(confianza {pr.confianza:.0f}). Fuente: {pr.fuente_url or 's/d'}."
                         + (f" Nota: {pr.notas}" if pr.notas else "")
                     )
 
