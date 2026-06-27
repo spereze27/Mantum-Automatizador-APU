@@ -76,6 +76,6 @@ jobs:
             --set-env-vars "GEMINI_MODEL=gemini-2.5-flash" \
             --set-env-vars "GEMINI_LOCATION=us-central1" \
             --set-env-vars "USE_GEMINI_PRICE_RESEARCH=true" \
-            --set-env-vars "GEMINI_PRICE_MAX_ITEMS=150" \
+            --set-env-vars "GEMINI_PRICE_MAX_ITEMS=750" \
             --set-env-vars "GEMINI_PRICE_MIN_CONFIDENCE=60" \
             --set-env-vars "DRY_RUN=false"
