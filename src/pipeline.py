@@ -584,7 +584,11 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                 gemini_price is not None
                 and n_price_research < settings.gemini_price_max_items
             ):
-                pr = gemini_price.research_price(desc, und)
+                pr = gemini_price.research_price(
+                    desc, und,
+                    referencia_bd=valor_wh_proj,
+                    resolve_links=settings.gemini_resolve_links,
+                )
                 n_price_research += 1
                 if (
                     pr is not None

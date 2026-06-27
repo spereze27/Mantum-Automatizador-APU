@@ -159,6 +159,11 @@ class Settings:
     gemini_price_min_confidence: int = field(
         default_factory=lambda: int(os.getenv("GEMINI_PRICE_MIN_CONFIDENCE", "60"))
     )
+    # Resolver el redirect de Vertex (vertexaisearch.../grounding-api-redirect/...)
+    # al enlace DIRECTO de la fuente. Añade una petición HTTP por fuente.
+    gemini_resolve_links: bool = field(
+        default_factory=lambda: os.getenv("GEMINI_RESOLVE_LINKS", "true").lower() == "true"
+    )
 
     # --- Comparativos config ---
     comparativos_config_path: str = field(
