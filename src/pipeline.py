@@ -582,7 +582,8 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             # En ambos adjunta el precio hallado + unidad y el ENLACE de la fuente.
             if (
                 gemini_price is not None
-                and n_price_research < settings.gemini_price_max_items
+                and (settings.gemini_price_max_items <= 0
+                     or n_price_research < settings.gemini_price_max_items)
             ):
                 pr = gemini_price.research_price(
                     desc, und,
@@ -608,10 +609,12 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                     link_ref = pr.fuente_url or ""
                     region_ref = "Internet"
                     prov_ref = pr.fuente_nombre or ""
+                    prod_txt = f" Producto hallado: \"{pr.producto}\"." if pr.producto else ""
                     de_donde = (
                         f"Sin fuente interna utilizable.{fuera_txt} Precio de referencia "
                         f"hallado en internet por Gemini: {_cop(precio_ref)}{unidad_txt} "
-                        f"(confianza {pr.confianza:.0f}). Fuente: {pr.fuente_url or 's/d'}."
+                        f"(confianza {pr.confianza:.0f}).{prod_txt} "
+                        f"Fuente: {pr.fuente_nombre or 's/d'} ({pr.fuente_url or 's/d'})."
                         + (f" Nota: {pr.notas}" if pr.notas else "")
                     )
 

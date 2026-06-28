@@ -152,11 +152,20 @@ def _best_grounding_url(resp) -> Optional[str]:
     return _grounding_url(resp)
 
 
-def _resolve_redirect(url: str, timeout: float = 6.0) -> str:
-    """Convierte el redirect de Vertex (grounding-api-redirect) en el enlace DIRECTO
-    de la fuente siguiendo la redirección HTTP. Si falla, devuelve el original."""
-    if not url or "grounding-api-redirect" not in url:
-        return url
+def _is_bad_link(u: str) -> bool:
+    """URL inservible como referencia directa: no http, búsqueda de Google,
+    captcha o página de consentimiento."""
+    u = u or ""
+    return (
+        not u.startswith("http")
+        or "google.com/search" in u
+        or "/sorry/" in u
+        or "consent.google" in u
+    )
+
+
+def _follow(url: str, timeout: float = 6.0) -> str:
+    """Sigue la redirección HTTP y devuelve la URL final (sea cual sea) o ''."""
     try:
         import requests
         r = requests.get(url, allow_redirects=True, timeout=timeout, stream=True,
@@ -166,11 +175,33 @@ def _resolve_redirect(url: str, timeout: float = 6.0) -> str:
             r.close()
         except Exception:
             pass
-        if final and "grounding-api-redirect" not in final:
-            return final
+        return final or ""
     except Exception as exc:  # pragma: no cover
         print(f"[gemini-precio] no se pudo resolver el redirect: {exc}")
-    return url
+        return ""
+
+
+def _pick_url(raw: str, model_url: str, resolve_links: bool) -> str:
+    """Elige el mejor enlace al PRODUCTO:
+    1) si el grounding dio un redirect de Vertex, lo resuelve al enlace DIRECTO;
+    2) si ese redirect lleva a una búsqueda de Google/captcha (o no resuelve),
+       usa la ficha del producto que devolvió el modelo (fuente_url);
+    3) como último recurso, conserva el redirect."""
+    raw = raw or ""
+    model_url = (model_url or "").strip()
+    is_redirect = "grounding-api-redirect" in raw
+    if resolve_links and is_redirect:
+        final = _follow(raw)
+        if final and not _is_bad_link(final) and "grounding-api-redirect" not in final:
+            return final  # enlace directo verificado
+        if model_url and not _is_bad_link(model_url):
+            return model_url  # ficha del producto dada por el modelo
+        return raw  # último recurso
+    if raw and not _is_bad_link(raw) and not is_redirect:
+        return raw  # ya era directo
+    if model_url and not _is_bad_link(model_url):
+        return model_url
+    return raw or model_url
 
 
 def _mk_config(t, **kw):
@@ -271,6 +302,7 @@ class PriceResearch:
     fuente_nombre: str
     confianza: float
     notas: str
+    producto: str = ""  # nombre EXACTO del producto/ficha hallado en la búsqueda
 
 
 _PRICE_PROMPT = """Eres un experto en precios de insumos de construcción y
@@ -298,8 +330,9 @@ Reglas IMPORTANTES:
 
 Responde al final SOLO un JSON válido con esta forma (sin texto extra después):
 {{"precio": <número COP o null>, "unidad": "<unidad>", "fuente_url": "<enlace a la
-  ficha con el precio>", "fuente_nombre": "<comercio/fuente>", "confidence": <0-100>,
-  "notas": "<breve>"}}
+  ficha con el precio>", "fuente_nombre": "<comercio/fuente>",
+  "producto": "<nombre EXACTO del producto/ficha que tiene ese precio>",
+  "confidence": <0-100>, "notas": "<breve>"}}
 """
 
 
@@ -388,9 +421,9 @@ class GeminiPriceResearcher:
             if data is not None:
                 precio = self._to_cop(data.get("precio"))
                 if precio is not None:
-                    url = _best_grounding_url(resp) or str(data.get("fuente_url", "") or "")
-                    if resolve_links and url:
-                        url = _resolve_redirect(url)
+                    raw = _best_grounding_url(resp) or ""
+                    model_url = str(data.get("fuente_url", "") or "")
+                    url = _pick_url(raw, model_url, resolve_links)
                     nombre = _grounding_titles(resp) or str(data.get("fuente_nombre", "") or "Referencia web").strip()
                     result = PriceResearch(
                         precio=precio,
@@ -399,6 +432,7 @@ class GeminiPriceResearcher:
                         fuente_nombre=nombre,
                         confianza=float(data.get("confidence", 0) or 0),
                         notas=str(data.get("notas", "") or "")[:200],
+                        producto=str(data.get("producto", "") or "")[:160],
                     )
         except Exception as exc:  # pragma: no cover
             self._fail_streak += 1
