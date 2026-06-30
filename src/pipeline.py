@@ -143,6 +143,39 @@ def _resolve_col(df, wanted: str) -> Optional[str]:
     return None
 
 
+def _ref_promedio_sin_outliers(precios, valor_wh_proj=None, max_ratio=3.0):
+    """Precio de referencia ÚNICO: promedio de TODAS las apariciones quitando
+    OUTLIERS estadísticos (IQR) y priorizando los valores cercanos a la BD.
+    Nunca deja el ítem sin referencia si hay al menos una aparición (si todas
+    quedan lejos de la BD, las usa igual en vez de descartarlas).
+    Devuelve (referencia, n_usadas, n_outliers, n_lejos_bd) o (None, 0, 0, 0)."""
+    import statistics
+    ps = sorted(float(p) for p in (precios or []) if p is not None and float(p) > 0)
+    if not ps:
+        return None, 0, 0, 0
+    usados = ps
+    n_outliers = 0
+    if len(ps) >= 4:
+        q1 = statistics.quantiles(ps, n=4)[0]
+        q3 = statistics.quantiles(ps, n=4)[2]
+        iqr = q3 - q1
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        filt = [p for p in ps if lo <= p <= hi]
+        if filt:
+            n_outliers = len(ps) - len(filt)
+            usados = filt
+    n_lejos = 0
+    if valor_wh_proj and max_ratio and float(valor_wh_proj) > 0:
+        lo_b = float(valor_wh_proj) / float(max_ratio)
+        hi_b = float(valor_wh_proj) * float(max_ratio)
+        cerca = [p for p in usados if lo_b <= p <= hi_b]
+        if cerca:  # prioriza cercanos; si NINGUNO queda cerca, conserva todos
+            n_lejos = len(usados) - len(cerca)
+            usados = cerca
+    ref = round(sum(usados) / len(usados), 2)
+    return ref, len(usados), n_outliers, n_lejos
+
+
 def run_pipeline(settings: Settings, storage_client=None, progress=None) -> PipelineResult:
     settings.validate()
     result = PipelineResult(dry_run=settings.dry_run, started_at=dt.datetime.utcnow().isoformat())
@@ -438,26 +471,20 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             # parseado a $9). CLAVE: si TODOS los registros de una fuente caen fuera
             # de la banda, esa fuente queda VACÍA; NO se hace fallback a usar los
             # valores absurdos (antes el consolidado caía de nuevo en con_all).
+            # Se CONSERVAN TODAS las apariciones (no se excluye ninguna por banda de
+            # cordura). La banda [BD/ratio, BD·ratio] solo se usa para PRIORIZAR las
+            # cercanas a la BD dentro del promedio de referencia (ver más abajo), no
+            # para descartar líneas. lo_band/hi_band se calculan para esa priorización
+            # y para mostrar el rango en el reporte.
             lo_band = hi_band = None
             if valor_wh_proj:
                 lo_band = valor_wh_proj / settings.max_price_ratio
                 hi_band = valor_wh_proj * settings.max_price_ratio
 
-            con = con_all
-            if lo_band is not None and not con_all.empty:
-                con = con_all[(con_all["precio"] >= lo_band) & (con_all["precio"] <= hi_band)]
-                n_con_fuera = len(con_all) - len(con)
-
-            cot = cot_full
-            if lo_band is not None and not cot_full.empty:
-                cot = cot_full[(cot_full["precio"] >= lo_band) & (cot_full["precio"] <= hi_band)]
-                n_cot_fuera = len(cot_full) - len(cot)
-            # Recorte adicional de outliers del comparativo por mediana (cuando ya
-            # hay varias cotizaciones dentro de la banda).
-            if len(cot) >= 4:
-                med = float(cot["precio"].median())
-                if med > 0:
-                    cot = cot[(cot["precio"] >= med / 4) & (cot["precio"] <= med * 4)]
+            con = con_all          # todas las apariciones del consolidado
+            cot = cot_full         # todas las apariciones de comparativos
+            n_con_fuera = 0        # ya no se excluye nada por banda
+            n_cot_fuera = 0
 
             # (3) Detalle de fuentes consultadas DENTRO de la banda de cordura (las
             # realmente consideradas). Las que quedaron fuera de rango se omiten del
@@ -524,54 +551,48 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                         "precio_real_max": round(float(sub["precio"].max()), 2),
                     })
 
-        # Precio de referencia:
-        #   - Si hay CONSOLIDADO (gasto real): se compara su PROMEDIO y su MÁXIMO
-        #     contra el valor del warehouse y se elige el más cercano a la BD
-        #     (la BD sirve de ancla de cordura: en insumos dispersos como
-        #     Transporte el máximo es el más parecido; en otros lo es el promedio).
-        #   - Si NO hay consolidado: promedio del comparativo excluyendo outliers.
-        ref_es_web = False  # True solo si la referencia vino de investigación web
-        if precio_cons_max is not None:
-            cand = {"PROMEDIO": precio_cons_prom, "MÁXIMO": precio_cons_max}
-            cand = {k: v for k, v in cand.items() if v is not None}
-            if valor_wh_proj:
-                etiqueta = min(cand, key=lambda k: abs(cand[k] - valor_wh_proj))
-            else:
-                etiqueta = "MÁXIMO"
-            precio_ref = cand[etiqueta]
-            tipo_ref = f"Gasto real (Consolidado) - {etiqueta.lower()} (más cercano a la BD)"
-            fuente_ref = arch_cons
-            link_ref = link_cons
-            region_ref = "Varias plantas"
-            prov_ref = ""
+        # Precio de referencia (MÉTODO ÚNICO): promedio de TODAS las apariciones
+        # (consolidado + comparativos juntas), quitando OUTLIERS estadísticos y
+        # PRIORIZANDO los valores cercanos a la BD. Si no hay ninguna aparición, se
+        # intenta la búsqueda web (Gemini).
+        ref_es_web = False
+        precios_pool = []
+        if not con_all.empty:
+            precios_pool += [float(x) for x in con_all["precio"].tolist() if x and float(x) > 0]
+        if not cot_full.empty:
+            precios_pool += [float(x) for x in cot_full["precio"].tolist() if x and float(x) > 0]
+        ref_val, n_usadas, n_out, n_lejos = _ref_promedio_sin_outliers(
+            precios_pool, valor_wh_proj, settings.max_price_ratio
+        )
+        if ref_val is not None:
+            precio_ref = ref_val
+            # Fuente/enlace: la aparición cuyo precio queda MÁS CERCA de la referencia.
+            fuente_ref = link_ref = region_ref = prov_ref = None
+            try:
+                pool_df = pd.concat([df for df in (con_all, cot_full) if not df.empty])
+                fr = pool_df.iloc[(pool_df["precio"] - precio_ref).abs().argsort().iloc[0]]
+                fuente_ref = fr.get("archivo", "")
+                link_ref = _gcs_link(fr.get("gcs_path", ""))
+                region_ref = fr.get("region", "")
+                prov_ref = fr.get("proveedor", "")
+            except Exception:
+                pass
+            tipo_ref = "Promedio sin outliers (todas las apariciones, prioriza cercanas a la BD)"
+            detalle = []
+            if n_out:
+                detalle.append(f"{n_out} outlier(s) estadístico(s) excluido(s)")
+            if n_lejos:
+                detalle.append(f"{n_lejos} alejado(s) de la BD despriorizado(s)")
+            extra = (" Ajustes: " + "; ".join(detalle) + "." if detalle else "")
             de_donde = (
-                f"Consolidado (gasto real): se eligió el {etiqueta} {_cop(precio_ref)} "
-                f"por ser el más cercano a la BD ({_cop(valor_wh_proj)}); de {n_cons} facturas "
-                f"(prom {_cop(precio_cons_prom)}, máx {_cop(precio_cons_max)}, mín {_cop(precio_cons_min)})."
-            )
-        elif precio_comp_prom is not None:
-            precio_ref = precio_comp_prom
-            tipo_ref = "Cotización proveedor - promedio (sin outliers)"
-            fuente_ref = arch_comp
-            link_ref = link_comp
-            region_ref = region_comp
-            prov_ref = prov_comp
-            de_donde = (
-                f"Sin consolidado. Promedio de {n_comp} cotización(es) excluyendo outliers "
-                f"'{arch_comp}' [{region_comp}, col '{col_comp}']."
+                f"Promedio de {n_usadas} aparición(es) (consolidado + comparativos), "
+                f"sin outliers y priorizando cercanas a la BD ({_cop(valor_wh_proj)}): "
+                f"{_cop(precio_ref)}.{extra}"
             )
         else:
             precio_ref = None
             fuente_ref = tipo_ref = link_ref = region_ref = prov_ref = None
-            if (n_con_fuera + n_cot_fuera) > 0 and lo_band is not None:
-                de_donde = (
-                    f"Sin fuente dentro del rango de cordura: {n_con_fuera + n_cot_fuera} "
-                    f"registro(s) quedaron fuera de [{_cop(lo_band)} , {_cop(hi_band)}] "
-                    f"respecto a la BD ({_cop(valor_wh_proj)}); probable unidad/alcance "
-                    f"distinto. Se mantiene el valor de la BD."
-                )
-            else:
-                de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
+            de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
             # --- FALLBACK: investigación de precio en internet con Gemini ---
             # Se dispara SIEMPRE que no haya referencia interna, en sus DOS casos:
@@ -656,9 +677,59 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             diferencia_vs_ipc = round(valor_wh_proj - ref_proj, 2)  # + = ahorro por unidad
             pct_diferencia = round((diferencia_vs_ipc / valor_wh_proj) * 100, 1)
             por_encima_ipc = ref_proj > valor_wh_proj
-            sospechoso_pct = abs(pct_diferencia) > 50  # diferencia >50% = sospechoso
+            sospechoso_pct = abs(pct_diferencia) > settings.suspicious_pct_threshold
             # Ahorro/sobrecosto ponderado por el consumo anual real.
             ahorro_ponderado = round(diferencia_vs_ipc * qty, 2)
+
+            # --- ARBITRAJE con Gemini cuando el PROMEDIO interno es sospechoso ---
+            # Si el promedio quedó marcado (>umbral vs BD), se consulta un precio de
+            # mercado en internet y se decide quién tiene razón: gana el valor (PROMEDIO
+            # o WAREHOUSE) que esté MÁS CERCA del precio web independiente.
+            if (
+                sospechoso_pct and not ref_es_web and precio_ref is not None
+                and gemini_price is not None and settings.gemini_arbitrate_suspicious
+                and (settings.gemini_price_max_items <= 0
+                     or n_price_research < settings.gemini_price_max_items)
+            ):
+                pr = gemini_price.research_price(
+                    desc, und, referencia_bd=valor_wh_proj,
+                    resolve_links=settings.gemini_resolve_links,
+                )
+                n_price_research += 1
+                if (pr is not None and pr.precio and pr.precio > 0
+                        and pr.confianza >= settings.gemini_price_min_confidence):
+                    web = float(pr.precio)
+                    d_avg = abs(float(precio_ref) - web)
+                    d_wh = abs(float(valor_wh or 0) - web)
+                    prod_txt = f" Producto: \"{pr.producto}\"." if pr.producto else ""
+                    link_web = pr.fuente_url or ""
+                    unidad_txt = f" / {pr.unidad}" if pr.unidad else ""
+                    if d_avg <= d_wh:
+                        # El promedio está más cerca del mercado: Gemini lo respalda.
+                        sospechoso_pct = False
+                        tipo_ref = (tipo_ref or "Promedio") + " · verificado por Gemini (respalda el promedio)"
+                        if link_web:
+                            link_ref = link_web
+                            fuente_ref = pr.fuente_nombre or fuente_ref
+                        de_donde += (
+                            f" Verificación web (Gemini): mercado {_cop(round(web, 2))}{unidad_txt} "
+                            f"(confianza {pr.confianza:.0f}) más cercano al PROMEDIO que a la BD; "
+                            f"se adopta el promedio.{prod_txt} "
+                            f"Fuente: {pr.fuente_nombre or 's/d'} ({link_web or 's/d'})."
+                        )
+                    else:
+                        # La BD está más cerca del mercado: se mantiene el warehouse.
+                        if link_web and not link_ref:
+                            link_ref = link_web
+                        de_donde += (
+                            f" Verificación web (Gemini): mercado {_cop(round(web, 2))}{unidad_txt} "
+                            f"(confianza {pr.confianza:.0f}) más cercano a la BD que al promedio; "
+                            f"se mantiene el warehouse.{prod_txt} "
+                            f"Fuente: {pr.fuente_nombre or 's/d'} ({link_web or 's/d'})."
+                        )
+                else:
+                    de_donde += (" Verificación web (Gemini): sin precio creíble; "
+                                 "se mantiene el warehouse.")
 
         if precio_ref is not None and not sospechoso_pct:
             # Valor a escribir: precio de referencia proyectado al año objetivo

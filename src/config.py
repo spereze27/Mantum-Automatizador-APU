@@ -159,6 +159,17 @@ class Settings:
     gemini_price_min_confidence: int = field(
         default_factory=lambda: int(os.getenv("GEMINI_PRICE_MIN_CONFIDENCE", "60"))
     )
+    # Diferencia (%) sobre la BD a partir de la cual un precio se marca "sospechoso"
+    # y NO se auto-aplica (queda visible para revisión). Subirlo aplica más cambios.
+    suspicious_pct_threshold: float = field(
+        default_factory=lambda: float(os.getenv("SUSPICIOUS_PCT_THRESHOLD", "50"))
+    )
+    # Cuando el promedio interno queda "sospechoso" (>umbral vs BD), consultar a
+    # Gemini un precio de mercado para arbitrar si tiene razón el PROMEDIO o la BD
+    # (gana el más cercano al precio web). Requiere use_gemini_price_research.
+    gemini_arbitrate_suspicious: bool = field(
+        default_factory=lambda: os.getenv("GEMINI_ARBITRATE_SUSPICIOUS", "true").lower() == "true"
+    )
     # Resolver el redirect de Vertex (vertexaisearch.../grounding-api-redirect/...)
     # al enlace DIRECTO de la fuente. Añade una petición HTTP por fuente.
     gemini_resolve_links: bool = field(
