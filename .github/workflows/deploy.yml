@@ -65,6 +65,7 @@ jobs:
             --set-env-vars "WAREHOUSE_TAB=PRIMARIOS" \
             --set-env-vars "WAREHOUSE_HEADER_ROW=2" \
             --set-env-vars "WH_COL_PRECIO=Precio de Lista" \
+            --set-env-vars "WH_CLASIF_INCLUIR=Activa,Duplicado" \
             --set-env-vars "WRITE_PRICE_COL=O" \
             --set-env-vars "WRITE_YEAR_COL=P" \
             --set-env-vars "IPC_VARIATION=${{ secrets.IPC_VARIATION }}" \

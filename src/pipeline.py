@@ -143,11 +143,11 @@ def _resolve_col(df, wanted: str) -> Optional[str]:
     return None
 
 
-def _ref_promedio_sin_outliers(precios, valor_wh_proj=None, max_ratio=3.0):
-    """Precio de referencia ÚNICO: promedio de TODAS las apariciones quitando
-    OUTLIERS estadísticos (IQR) y priorizando los valores cercanos a la BD.
-    Nunca deja el ítem sin referencia si hay al menos una aparición (si todas
-    quedan lejos de la BD, las usa igual en vez de descartarlas).
+def _ref_maximo_sin_outliers(precios, valor_wh_proj=None, max_ratio=3.0):
+    """Precio de referencia ÚNICO: el MÁXIMO de las apariciones quitando OUTLIERS
+    estadísticos (IQR) y priorizando los valores cercanos a la BD. Nunca deja el
+    ítem sin referencia si hay al menos una aparición (si todas quedan lejos de la
+    BD, las usa igual en vez de descartarlas).
     Devuelve (referencia, n_usadas, n_outliers, n_lejos_bd) o (None, 0, 0, 0)."""
     import statistics
     ps = sorted(float(p) for p in (precios or []) if p is not None and float(p) > 0)
@@ -172,7 +172,7 @@ def _ref_promedio_sin_outliers(precios, valor_wh_proj=None, max_ratio=3.0):
         if cerca:  # prioriza cercanos; si NINGUNO queda cerca, conserva todos
             n_lejos = len(usados) - len(cerca)
             usados = cerca
-    ref = round(sum(usados) / len(usados), 2)
+    ref = round(max(usados), 2)   # MÁXIMO de las apariciones (ya sin outliers)
     return ref, len(usados), n_outliers, n_lejos
 
 
@@ -222,11 +222,12 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         & wh["_valor"].notna()
         & wh["_grupo_norm"].isin(MATCHABLE_GROUPS)
     )
-    # Solo actividades ACTIVAS (la columna Clasificación marca Activa/Inactiva/
-    # Duplicado/Reubicar). Las inactivas no se actualizan ni cuentan.
+    # Solo las actividades cuya Clasificación esté en la lista a incluir (por
+    # defecto Activa y Duplicado). Inactiva/Reubicar no se actualizan ni cuentan.
     if settings.only_active and C_CLASIF is not None:
+        incluir = {c.strip().lower() for c in str(settings.wh_clasif_incluir).split(",") if c.strip()}
         clasif_norm = wh[C_CLASIF].astype(str).str.strip().str.lower()
-        mask = mask & clasif_norm.eq(settings.wh_active_value.strip().lower())
+        mask = mask & clasif_norm.isin(incluir)
     insumos = wh[mask].copy()
     result.insumos_evaluados = len(insumos)
 
@@ -435,6 +436,7 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         cantidad_consumo = None
         lo_band = hi_band = None
         n_con_fuera = n_cot_fuera = 0
+        con_all = cot_full = comp.iloc[0:0]  # vacíos por defecto (si no hay match)
 
         if matched and not comp.empty:
             grp = comp[comp["item_norm"].isin(match_norms)].copy()
@@ -561,7 +563,7 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             precios_pool += [float(x) for x in con_all["precio"].tolist() if x and float(x) > 0]
         if not cot_full.empty:
             precios_pool += [float(x) for x in cot_full["precio"].tolist() if x and float(x) > 0]
-        ref_val, n_usadas, n_out, n_lejos = _ref_promedio_sin_outliers(
+        ref_val, n_usadas, n_out, n_lejos = _ref_maximo_sin_outliers(
             precios_pool, valor_wh_proj, settings.max_price_ratio
         )
         if ref_val is not None:
@@ -577,7 +579,7 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                 prov_ref = fr.get("proveedor", "")
             except Exception:
                 pass
-            tipo_ref = "Promedio sin outliers (todas las apariciones, prioriza cercanas a la BD)"
+            tipo_ref = "Máximo sin outliers (todas las apariciones, prioriza cercanas a la BD)"
             detalle = []
             if n_out:
                 detalle.append(f"{n_out} outlier(s) estadístico(s) excluido(s)")
@@ -585,7 +587,7 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                 detalle.append(f"{n_lejos} alejado(s) de la BD despriorizado(s)")
             extra = (" Ajustes: " + "; ".join(detalle) + "." if detalle else "")
             de_donde = (
-                f"Promedio de {n_usadas} aparición(es) (consolidado + comparativos), "
+                f"Máximo de {n_usadas} aparición(es) (consolidado + comparativos), "
                 f"sin outliers y priorizando cercanas a la BD ({_cop(valor_wh_proj)}): "
                 f"{_cop(precio_ref)}.{extra}"
             )
@@ -705,16 +707,16 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                     link_web = pr.fuente_url or ""
                     unidad_txt = f" / {pr.unidad}" if pr.unidad else ""
                     if d_avg <= d_wh:
-                        # El promedio está más cerca del mercado: Gemini lo respalda.
+                        # El máximo está más cerca del mercado: Gemini lo respalda.
                         sospechoso_pct = False
-                        tipo_ref = (tipo_ref or "Promedio") + " · verificado por Gemini (respalda el promedio)"
+                        tipo_ref = (tipo_ref or "Máximo") + " · verificado por Gemini (respalda el máximo)"
                         if link_web:
                             link_ref = link_web
                             fuente_ref = pr.fuente_nombre or fuente_ref
                         de_donde += (
                             f" Verificación web (Gemini): mercado {_cop(round(web, 2))}{unidad_txt} "
-                            f"(confianza {pr.confianza:.0f}) más cercano al PROMEDIO que a la BD; "
-                            f"se adopta el promedio.{prod_txt} "
+                            f"(confianza {pr.confianza:.0f}) más cercano al MÁXIMO que a la BD; "
+                            f"se adopta el máximo.{prod_txt} "
                             f"Fuente: {pr.fuente_nombre or 's/d'} ({link_web or 's/d'})."
                         )
                     else:
@@ -723,7 +725,7 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                             link_ref = link_web
                         de_donde += (
                             f" Verificación web (Gemini): mercado {_cop(round(web, 2))}{unidad_txt} "
-                            f"(confianza {pr.confianza:.0f}) más cercano a la BD que al promedio; "
+                            f"(confianza {pr.confianza:.0f}) más cercano a la BD que al máximo; "
                             f"se mantiene el warehouse.{prod_txt} "
                             f"Fuente: {pr.fuente_nombre or 's/d'} ({link_web or 's/d'})."
                         )

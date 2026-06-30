@@ -86,6 +86,11 @@ class Settings:
     # Procesar solo actividades activas (Clasificación == 'Activa').
     only_active: bool = field(default_factory=lambda: os.getenv("ONLY_ACTIVE", "true").lower() == "true")
     wh_active_value: str = field(default_factory=lambda: os.getenv("WH_ACTIVE_VALUE", "Activa"))
+    # Clasificaciones de la columna Clasificación que SÍ se procesan (coma-separado).
+    # Por defecto Activa y Duplicado.
+    wh_clasif_incluir: str = field(
+        default_factory=lambda: os.getenv("WH_CLASIF_INCLUIR", "Activa,Duplicado")
+    )
 
     # --- Credenciales ---
     # En Cloud Run se usa la SA del runtime (ADC). En local/CI se puede pasar el
