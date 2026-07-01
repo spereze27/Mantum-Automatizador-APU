@@ -217,13 +217,11 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
 
     wh["_grupo_norm"] = wh[C_GRUPO].astype(str).str.strip().str.lower()
     wh["_valor"] = wh[C_PRECIO].map(_to_float)
-    # NOTA: ya NO se exige que el warehouse tenga precio. Los primarios Activa/
-    # Duplicado SIN valor (p.ej. 'Transporte Materiales', 'Herramienta menor')
-    # también se procesan para poder ASIGNARLES un precio desde consolidado/
-    # comparativos/Gemini. El valor de BD vacío se trata como 0 (sin BD).
+    # Aparecen TODOS los ítems del warehouse Activa/Duplicado (con nombre). El
+    # grupo ya NO excluye: los grupos no procesables (Contrato/Administración) se
+    # incluyen igual pero conservan su valor del warehouse (no se cruzan).
     mask = (
         wh[C_DESC].astype(str).str.strip().ne("")
-        & wh["_grupo_norm"].isin(MATCHABLE_GROUPS)
     )
     # Solo las actividades cuya Clasificación esté en la lista a incluir (por
     # defecto Activa y Duplicado). Inactiva/Reubicar no se actualizan ni cuentan.
@@ -394,15 +392,24 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         valor_wh_proj = round(valor_wh * factor_proj, 2)
         valor_wh_ipc = valor_wh_proj  # alias para guardia de magnitud y diferencias
 
+        es_procesable = str(row.get(C_GRUPO, "")).strip().lower() in MATCHABLE_GROUPS
+
         m = matcher.match(desc, und)
         metodo = m.method
         score = m.score
         candidato = m.candidate_raw
-        cand_norm = m.candidate_norm if m.matched else None
+        cand_norm = m.candidate_norm if (m.matched and es_procesable) else None
+        if not es_procesable:
+            # Grupo no procesable (p.ej. Contrato/Administración): aparece en el
+            # reporte pero conserva su valor del warehouse (no se cruza ni se busca).
+            candidato = ""
+            metodo = "no procesable (grupo)"
+            score = 0.0
 
         # Segunda pasada con Gemini SOLO si el fuzzy quedó en zona dudosa.
         if (
-            gemini is not None
+            es_procesable
+            and gemini is not None
             and not m.matched
             and settings.gemini_min_score <= m.score < settings.fuzzy_threshold
         ):
@@ -630,7 +637,8 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             #       cordura (n_con_fuera + n_cot_fuera > 0).
             # En ambos adjunta el precio hallado + unidad y el ENLACE de la fuente.
             if (
-                gemini_price is not None
+                es_procesable
+                and gemini_price is not None
                 and (settings.gemini_price_max_items <= 0
                      or n_price_research < settings.gemini_price_max_items)
             ):
