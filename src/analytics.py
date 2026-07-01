@@ -39,6 +39,7 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
         "todas_las_fuentes",
         "precio_consolidado_promedio", "precio_consolidado_mediana",
         "precio_consolidado_min", "precio_consolidado_max", "n_facturas_consolidado",
+        "apariciones_consolidado",
         "consumo_anual",
         "precio_referencia", "como_se_calculo", "de_donde_salio_el_precio",
         "fuente_que_refuta", "enlace_fuente",

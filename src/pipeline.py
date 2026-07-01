@@ -444,6 +444,7 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         precio_cons_prom = precio_cons_med = precio_cons_min = precio_cons_max = n_cons = None
         link_cons = arch_cons = None
         todas_las_fuentes = None
+        apariciones_consolidado = None
         cantidad_consumo = None
         lo_band = hi_band = None
         n_con_fuera = n_cot_fuera = 0
@@ -519,6 +520,23 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                     f"[{_cop(lo_band)} , {_cop(hi_band)}], omitidas)"
                 )
             todas_las_fuentes = " ; ".join(fuentes) if fuentes else None
+
+            # Desglose COMPLETO del consolidado (todas las apariciones/facturas que
+            # alimentaron el cálculo), sin que los comparativos las tapen. Cada línea:
+            # [región/proveedor] descripción: $precio.
+            if not con_all.empty:
+                cs = con_all.sort_values("precio")
+                lineas_c = []
+                for _, fr in cs.head(400).iterrows():
+                    reg = str(fr.get("region", "") or "").strip()
+                    prov = str(fr.get("proveedor", "") or "").strip()
+                    dsc = str(fr.get("descripcion", "") or "").strip()
+                    etiqueta = f"[{reg}{('/' + prov) if prov else ''}]"
+                    dtxt = f" {dsc[:45]}" if dsc else ""
+                    lineas_c.append(f"{etiqueta}{dtxt}: {_cop(fr.get('precio'))}")
+                if len(cs) > 400:
+                    lineas_c.append(f"(+{len(cs) - 400} apariciones más)")
+                apariciones_consolidado = " ; ".join(lineas_c) if lineas_c else None
 
             if not cot.empty:
                 rmin = cot.loc[cot["precio"].idxmin()]
@@ -812,6 +830,7 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             "proveedor_comparativo_max": prov_comp_max,
             "archivo_comparativo_max": arch_comp_max,
             "todas_las_fuentes": todas_las_fuentes,
+            "apariciones_consolidado": apariciones_consolidado,
             # Gasto real (Consolidado)
             "precio_consolidado_promedio": precio_cons_prom,
             "precio_consolidado_mediana": precio_cons_med,
