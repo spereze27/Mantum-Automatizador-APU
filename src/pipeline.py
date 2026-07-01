@@ -217,9 +217,12 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
 
     wh["_grupo_norm"] = wh[C_GRUPO].astype(str).str.strip().str.lower()
     wh["_valor"] = wh[C_PRECIO].map(_to_float)
+    # NOTA: ya NO se exige que el warehouse tenga precio. Los primarios Activa/
+    # Duplicado SIN valor (p.ej. 'Transporte Materiales', 'Herramienta menor')
+    # también se procesan para poder ASIGNARLES un precio desde consolidado/
+    # comparativos/Gemini. El valor de BD vacío se trata como 0 (sin BD).
     mask = (
         wh[C_DESC].astype(str).str.strip().ne("")
-        & wh["_valor"].notna()
         & wh["_grupo_norm"].isin(MATCHABLE_GROUPS)
     )
     # Solo las actividades cuya Clasificación esté en la lista a incluir (por
@@ -381,6 +384,7 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         und = str(row.get(C_UND, "")).strip()
         categoria = _categoria(row.get(C_GRUPO, ""))
         valor_wh = row["_valor"]
+        valor_wh = 0.0 if (valor_wh is None or pd.isna(valor_wh)) else float(valor_wh)
         # Factor de proyección: al año actual = 1 (sin proyectar); al año siguiente,
         # material/viáticos usan IPC y mano de obra el incremento del salario mínimo.
         if siguiente:
@@ -586,10 +590,32 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             if n_lejos:
                 detalle.append(f"{n_lejos} alejado(s) de la BD despriorizado(s)")
             extra = (" Ajustes: " + "; ".join(detalle) + "." if detalle else "")
+            # Desglose por fuente (como en el reporte original): cuántas facturas del
+            # consolidado y cuántas cotizaciones, con su prom/máx/mín.
+            desglose = []
+            if not con_all.empty:
+                cp = pd.to_numeric(con_all["precio"], errors="coerce").dropna()
+                n_pl = con_all["region"].nunique() if "region" in con_all.columns else None
+                pl_txt = f" en {n_pl} planta(s)" if n_pl else ""
+                if len(cp):
+                    desglose.append(
+                        f"Consolidado (gasto real): {len(cp)} factura(s){pl_txt} "
+                        f"(prom {_cop(round(cp.mean(),2))}, máx {_cop(round(cp.max(),2))}, "
+                        f"mín {_cop(round(cp.min(),2))})"
+                    )
+            if not cot_full.empty:
+                qp = pd.to_numeric(cot_full["precio"], errors="coerce").dropna()
+                if len(qp):
+                    desglose.append(
+                        f"Comparativos: {len(qp)} cotización(es) "
+                        f"(prom {_cop(round(qp.mean(),2))}, máx {_cop(round(qp.max(),2))}, "
+                        f"mín {_cop(round(qp.min(),2))})"
+                    )
+            desglose_txt = (" Desglose: " + "; ".join(desglose) + "." if desglose else "")
             de_donde = (
                 f"Máximo de {n_usadas} aparición(es) (consolidado + comparativos), "
                 f"sin outliers y priorizando cercanas a la BD ({_cop(valor_wh_proj)}): "
-                f"{_cop(precio_ref)}.{extra}"
+                f"{_cop(precio_ref)}.{extra}{desglose_txt}"
             )
         else:
             precio_ref = None
