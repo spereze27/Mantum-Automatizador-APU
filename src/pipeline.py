@@ -176,6 +176,38 @@ def _ref_maximo_sin_outliers(precios, valor_wh_proj=None, max_ratio=3.0):
     return ref, len(usados), n_outliers, n_lejos
 
 
+def _investigar_web(gemini_price, desc, und, valor_wh_proj, settings, contexto=""):
+    """Ejecuta la búsqueda de precio en internet con Gemini y devuelve un dict con
+    los campos de referencia web, o None si no hay precio creíble. Reutilizable en
+    el fallback (sin datos internos) y tras el descarte por magnitud."""
+    pr = gemini_price.research_price(
+        desc, und, referencia_bd=valor_wh_proj,
+        resolve_links=settings.gemini_resolve_links,
+    )
+    if (pr is None or not pr.precio or pr.precio <= 0
+            or pr.confianza < settings.gemini_price_min_confidence):
+        return None
+    precio = round(float(pr.precio), 2)
+    unidad_txt = f" / {pr.unidad}" if pr.unidad else ""
+    prod_txt = f" Producto hallado: \"{pr.producto}\"." if pr.producto else ""
+    calc_txt = f" Escalado por unidad: {pr.calculo}." if (pr.escalado and pr.calculo) else ""
+    de_donde = (
+        f"{contexto}Precio de referencia hallado en internet por Gemini: "
+        f"{_cop(precio)}{unidad_txt} (confianza {pr.confianza:.0f}).{prod_txt}{calc_txt} "
+        f"Fuente: {pr.fuente_nombre or 's/d'} ({pr.fuente_url or 's/d'})."
+        + (f" Nota: {pr.notas}" if pr.notas else "")
+    )
+    return {
+        "precio_ref": precio,
+        "tipo_ref": f"Investigación web (Gemini){(' · unidad ' + pr.unidad) if pr.unidad else ''}",
+        "fuente_ref": pr.fuente_nombre or "Referencia web",
+        "link_ref": pr.fuente_url or "",
+        "region_ref": "Internet",
+        "prov_ref": pr.fuente_nombre or "",
+        "de_donde": de_donde,
+    }
+
+
 def run_pipeline(settings: Settings, storage_client=None, progress=None) -> PipelineResult:
     settings.validate()
     result = PipelineResult(dry_run=settings.dry_run, started_at=dt.datetime.utcnow().isoformat())
@@ -587,6 +619,7 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         # PRIORIZANDO los valores cercanos a la BD. Si no hay ninguna aparición, se
         # intenta la búsqueda web (Gemini).
         ref_es_web = False
+        web_intentado = False
         precios_pool = []
         if not con_all.empty:
             precios_pool += [float(x) for x in con_all["precio"].tolist() if x and float(x) > 0]
@@ -648,53 +681,22 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
             # --- FALLBACK: investigación de precio en internet con Gemini ---
-            # Se dispara SIEMPRE que no haya referencia interna, en sus DOS casos:
-            #   (a) no hubo ninguna coincidencia interna (matched=False o sin
-            #       registros), y
-            #   (b) hubo coincidencias pero TODAS quedaron fuera del rango de
-            #       cordura (n_con_fuera + n_cot_fuera > 0).
-            # En ambos adjunta el precio hallado + unidad y el ENLACE de la fuente.
+            # Sin ninguna referencia interna: buscar en internet.
             if (
                 es_procesable
                 and gemini_price is not None
                 and (settings.gemini_price_max_items <= 0
                      or n_price_research < settings.gemini_price_max_items)
             ):
-                pr = gemini_price.research_price(
-                    desc, und,
-                    referencia_bd=valor_wh_proj,
-                    resolve_links=settings.gemini_resolve_links,
-                )
+                web_intentado = True
                 n_price_research += 1
-                if (
-                    pr is not None
-                    and pr.precio
-                    and pr.precio > 0
-                    and pr.confianza >= settings.gemini_price_min_confidence
-                ):
-                    fuera_txt = ""
-                    if (n_con_fuera + n_cot_fuera) > 0 and lo_band is not None:
-                        fuera_txt = (f" Las {n_con_fuera + n_cot_fuera} fuente(s) internas "
-                                     f"quedaron fuera del rango [{_cop(lo_band)} , {_cop(hi_band)}].")
-                    precio_ref = round(float(pr.precio), 2)
-                    ref_es_web = True
-                    unidad_txt = f" / {pr.unidad}" if pr.unidad else ""
-                    tipo_ref = f"Investigación web (Gemini){(' · unidad ' + pr.unidad) if pr.unidad else ''}"
-                    fuente_ref = pr.fuente_nombre or "Referencia web"
-                    link_ref = pr.fuente_url or ""
-                    region_ref = "Internet"
-                    prov_ref = pr.fuente_nombre or ""
-                    prod_txt = f" Producto hallado: \"{pr.producto}\"." if pr.producto else ""
-                    calc_txt = ""
-                    if pr.escalado and pr.calculo:
-                        calc_txt = f" Escalado por unidad: {pr.calculo}."
-                    de_donde = (
-                        f"Sin fuente interna utilizable.{fuera_txt} Precio de referencia "
-                        f"hallado en internet por Gemini: {_cop(precio_ref)}{unidad_txt} "
-                        f"(confianza {pr.confianza:.0f}).{prod_txt}{calc_txt} "
-                        f"Fuente: {pr.fuente_nombre or 's/d'} ({pr.fuente_url or 's/d'})."
-                        + (f" Nota: {pr.notas}" if pr.notas else "")
-                    )
+                wr = _investigar_web(gemini_price, desc, und, valor_wh_proj, settings,
+                                     contexto="Sin fuente interna utilizable. ")
+                if wr is not None:
+                    precio_ref = wr["precio_ref"]; ref_es_web = True
+                    tipo_ref = wr["tipo_ref"]; fuente_ref = wr["fuente_ref"]
+                    link_ref = wr["link_ref"]; region_ref = wr["region_ref"]
+                    prov_ref = wr["prov_ref"]; de_donde = wr["de_donde"]
 
         # (La referencia ya usa solo el consolidado cuando existe, así que no hay
         # mezcla de fuentes que reconciliar.)
@@ -720,6 +722,27 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             if descartado_magnitud:
                 precio_ref = None
                 fuente_ref = tipo_ref = link_ref = None
+
+        # --- FALLBACK web tras magnitud ---: si el ítem quedó SIN referencia usable
+        # (descartado por magnitud o el máximo se salió) y aún no se buscó en internet,
+        # se busca ahora con Gemini. Así los ítems que sí existen en el mercado
+        # (Sikafloor, Sanitario Corona, Teja Eternit, etc.) no quedan sin precio.
+        if (
+            precio_ref is None and es_procesable and not web_intentado
+            and gemini_price is not None
+            and (settings.gemini_price_max_items <= 0
+                 or n_price_research < settings.gemini_price_max_items)
+        ):
+            web_intentado = True
+            n_price_research += 1
+            ctx = ("Referencia interna descartada por magnitud. " if descartado_magnitud
+                   else "Sin fuente interna utilizable. ")
+            wr = _investigar_web(gemini_price, desc, und, valor_wh_proj, settings, contexto=ctx)
+            if wr is not None:
+                precio_ref = wr["precio_ref"]; ref_es_web = True
+                tipo_ref = wr["tipo_ref"]; fuente_ref = wr["fuente_ref"]
+                link_ref = wr["link_ref"]; region_ref = wr["region_ref"]
+                prov_ref = wr["prov_ref"]; de_donde = wr["de_donde"]
 
         diferencia_vs_ipc = pct_diferencia = por_encima_ipc = None
         ahorro_ponderado = None
