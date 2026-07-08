@@ -699,27 +699,23 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         # (La referencia ya usa solo el consolidado cuando existe, así que no hay
         # mezcla de fuentes que reconciliar.)
 
-        # Guardia de cordura por magnitud: descarta referencias desproporcionadas
-        # (p.ej. una tarifa por m2 cruzada contra un 'MANO DE OBRA' global). NO se
-        # aplica a referencias web: ahí se conserva el precio + enlace para que sean
-        # visibles, y el control de >50% más abajo evita el auto-update si difiere.
+        # Guardia de cordura por magnitud (SUAVIZADA): antes se borraba toda
+        # referencia fuera de [BD/ratio, BD·ratio]; eso dejaba sin fuente a ítems que
+        # cruzaban perfecto (score 100) solo porque el máximo se alejaba de la BD.
+        # Ahora SOLO se descarta cuando el match NO es confiable (score bajo) Y la
+        # relación es extrema (probable cruce equivocado de unidad/alcance). Los
+        # matches confiables lejos de la BD NO se borran: pasan por el control de
+        # sospechoso + arbitraje de Gemini (que decide si tiene razón el máximo o la BD).
         descartado_magnitud = False
         if precio_ref is not None and valor_wh_proj and not ref_es_web:
             ratio = precio_ref / valor_wh_proj
             extremo = ratio > settings.extreme_ratio or ratio < 1.0 / settings.extreme_ratio
-            if ratio > settings.max_price_ratio or ratio < 1.0 / settings.max_price_ratio:
-                descartado_magnitud = True
-                de_donde = (
-                    f"DESCARTADO por magnitud: referencia {_cop(precio_ref)} vs BD "
-                    f"{_cop(valor_wh_proj)} (relación {ratio:.0f}x; probable unidad/alcance distinto)."
-                )
-            elif extremo and score < settings.high_score_for_extreme:
-                # Valor extremo vs la BD pero el match no es lo bastante confiable.
+            if extremo and score < settings.high_score_for_extreme:
                 descartado_magnitud = True
                 de_donde = (
                     f"DESCARTADO: referencia {_cop(precio_ref)} se aleja {ratio:.1f}x de la BD "
                     f"({_cop(valor_wh_proj)}) y el match no es confiable (score {score:.0f} < "
-                    f"{int(settings.high_score_for_extreme)})."
+                    f"{int(settings.high_score_for_extreme)}); probable cruce equivocado."
                 )
             if descartado_magnitud:
                 precio_ref = None
@@ -759,6 +755,8 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                     d_avg = abs(float(precio_ref) - web)
                     d_wh = abs(float(valor_wh or 0) - web)
                     prod_txt = f" Producto: \"{pr.producto}\"." if pr.producto else ""
+                    if pr.escalado and pr.calculo:
+                        prod_txt += f" Escalado por unidad: {pr.calculo}."
                     link_web = pr.fuente_url or ""
                     unidad_txt = f" / {pr.unidad}" if pr.unidad else ""
                     if d_avg <= d_wh:
@@ -788,13 +786,27 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                     de_donde += (" Verificación web (Gemini): sin precio creíble; "
                                  "se mantiene el warehouse.")
 
-        if precio_ref is not None and not sospechoso_pct:
+        # Decisión de aplicar: además de los no-sospechosos, se aplican los que
+        # estén DENTRO de la banda de cordura [BD/ratio, BD·ratio] aunque superen el
+        # umbral del 50% (esa banda ya es el límite de sensatez). Lo que se sale de
+        # la banda solo se aplica si el arbitraje de Gemini levantó la marca.
+        dentro_banda = False
+        if precio_ref is not None:
+            if not valor_wh_proj or valor_wh_proj <= 0:
+                dentro_banda = True  # sin BD contra qué comparar: se adopta la referencia
+            else:
+                r_ok = precio_ref / valor_wh_proj
+                dentro_banda = (1.0 / settings.max_price_ratio) <= r_ok <= settings.max_price_ratio
+        aplicar = precio_ref is not None and (
+            not sospechoso_pct or (settings.auto_apply_within_band and dentro_banda)
+        )
+        if aplicar:
             # Valor a escribir: precio de referencia proyectado al año objetivo
             # (IPC para material/viáticos, salario mínimo para mano de obra).
             nuevo_valor = round(precio_ref * factor_proj, 2)
             actualizado = True
         else:
-            # Sin fuente confiable, o diferencia sospechosa (>50%): NO se adopta el
+            # Sin fuente confiable, o fuera de banda sin respaldo: NO se adopta el
             # valor de mercado. Se conserva el precio de la BD proyectado por el
             # factor (al año actual queda igual; al siguiente, IPC/SMLV). Estos
             # casos quedan en la hoja 'Items a Revisar' para decisión manual.

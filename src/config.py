@@ -175,6 +175,14 @@ class Settings:
     gemini_arbitrate_suspicious: bool = field(
         default_factory=lambda: os.getenv("GEMINI_ARBITRATE_SUSPICIOUS", "true").lower() == "true"
     )
+    # Cuando la referencia cae DENTRO de la banda de cordura [BD/ratio, BD·ratio],
+    # se auto-aplica aunque supere el umbral de "sospechoso" (maximiza actualizaciones
+    # dentro del rango que TÚ definiste con MAX_PRICE_RATIO). Solo lo que se sale de la
+    # banda queda para arbitraje de Gemini / revisión. Poner en false vuelve al
+    # comportamiento estricto (bloquear todo lo >SUSPICIOUS_PCT_THRESHOLD).
+    auto_apply_within_band: bool = field(
+        default_factory=lambda: os.getenv("AUTO_APPLY_WITHIN_BAND", "true").lower() == "true"
+    )
     # Resolver el redirect de Vertex (vertexaisearch.../grounding-api-redirect/...)
     # al enlace DIRECTO de la fuente. Añade una petición HTTP por fuente.
     gemini_resolve_links: bool = field(
