@@ -685,10 +685,13 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                     region_ref = "Internet"
                     prov_ref = pr.fuente_nombre or ""
                     prod_txt = f" Producto hallado: \"{pr.producto}\"." if pr.producto else ""
+                    calc_txt = ""
+                    if pr.escalado and pr.calculo:
+                        calc_txt = f" Escalado por unidad: {pr.calculo}."
                     de_donde = (
                         f"Sin fuente interna utilizable.{fuera_txt} Precio de referencia "
                         f"hallado en internet por Gemini: {_cop(precio_ref)}{unidad_txt} "
-                        f"(confianza {pr.confianza:.0f}).{prod_txt} "
+                        f"(confianza {pr.confianza:.0f}).{prod_txt}{calc_txt} "
                         f"Fuente: {pr.fuente_nombre or 's/d'} ({pr.fuente_url or 's/d'})."
                         + (f" Nota: {pr.notas}" if pr.notas else "")
                     )

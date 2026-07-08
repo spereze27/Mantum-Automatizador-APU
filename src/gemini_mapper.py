@@ -303,6 +303,10 @@ class PriceResearch:
     confianza: float
     notas: str
     producto: str = ""  # nombre EXACTO del producto/ficha hallado en la búsqueda
+    calculo: str = ""   # cómo se obtuvo el precio (escalado por unidad, si aplica)
+    precio_base: Optional[float] = None  # precio de la unidad base (antes de escalar)
+    unidad_base: str = ""  # unidad base usada para escalar (p.ej. 'm', 'kg', 'unidad')
+    escalado: bool = False  # True si el precio se obtuvo escalando una unidad base
 
 
 _PRICE_PROMPT = """Eres un experto en precios de insumos de construcción y
@@ -322,15 +326,27 @@ Reglas IMPORTANTES:
   fabricante con precio. La URL debe llevar a la ficha del producto con su precio.
 - Devuelve el precio en COP por la unidad indicada (o la unidad real del producto si
   difiere; en ese caso indícala en "unidad").
+- ESCALADO POR UNIDAD (para aumentar coincidencias): si NO encuentras la presentación
+  EXACTA del ítem (p.ej. "tubería de 6 m"), busca el precio de una presentación
+  estándar o por unidad base (p.ej. "$X por metro", "tubo de 1 m", "por kg", "por
+  litro", "por m2") y ESCÁLALO a la cantidad/dimensión del ítem:
+  precio_final = precio_base × cantidad. Ejemplo: ítem "Tubería PVC 6 m", encuentras
+  "Tubería PVC $12.000/m" → precio = 72.000, precio_base = 12.000, unidad_base = "m",
+  calculo = "$12.000/m × 6 m = $72.000". Usa el escalado SOLO cuando no exista la
+  presentación exacta, y solo si el escalado es razonable (lineal); no escales si el
+  precio no es proporcional (p.ej. accesorios, equipos). Indica "escalado": true.
 - Si el precio típico incluye IVA, da el valor ANTES de IVA si puedes estimarlo; si
   no, deja el precio tal cual y acláralo en "notas".
 - Si hay varias fuentes creíbles con precio explícito{ref_pref}, elige la MÁS
   representativa; NO inventes ni fuerces un valor para que coincida.
-- Si NO encuentras un precio creíble y EXPLÍCITO, responde precio = null.
+- Si NO encuentras un precio creíble y EXPLÍCITO (ni directo ni escalable), responde
+  precio = null.
 
 Responde al final SOLO un JSON válido con esta forma (sin texto extra después):
-{{"precio": <número COP o null>, "unidad": "<unidad>", "fuente_url": "<enlace a la
-  ficha con el precio>", "fuente_nombre": "<comercio/fuente>",
+{{"precio": <número COP final o null>, "unidad": "<unidad del ítem>",
+  "precio_base": <número COP de la unidad base o null>, "unidad_base": "<unidad base>",
+  "escalado": <true/false>, "calculo": "<cómo se calculó, p.ej. $12.000/m × 6 m>",
+  "fuente_url": "<enlace a la ficha con el precio>", "fuente_nombre": "<comercio/fuente>",
   "producto": "<nombre EXACTO del producto/ficha que tiene ese precio>",
   "confidence": <0-100>, "notas": "<breve>"}}
 """
@@ -433,6 +449,10 @@ class GeminiPriceResearcher:
                         confianza=float(data.get("confidence", 0) or 0),
                         notas=str(data.get("notas", "") or "")[:200],
                         producto=str(data.get("producto", "") or "")[:160],
+                        calculo=str(data.get("calculo", "") or "").strip()[:200],
+                        precio_base=self._to_cop(data.get("precio_base")),
+                        unidad_base=str(data.get("unidad_base", "") or "").strip()[:30],
+                        escalado=bool(data.get("escalado", False)),
                     )
         except Exception as exc:  # pragma: no cover
             self._fail_streak += 1
