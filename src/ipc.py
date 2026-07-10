@@ -2,6 +2,7 @@
 
 El factor se calcula como (1 + variacion_ipc). Se aplica para llevar valores de
 un año base al año objetivo de comparación.
+
 """
 from __future__ import annotations
 

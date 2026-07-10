@@ -27,7 +27,7 @@ from .pipeline import run_pipeline
 
 app = FastAPI(title="Mantum Automatizador APU", version="2.1.0")
 
-# --- Estado del trabajo en segundo plano (instancia única) ---------------- #
+# --- Estado del trabajo en segundo plano (instancia única) ---------------#
 # El pipeline puede tardar varios minutos (sobre todo con Gemini activo), más
 # de lo que aguanta el navegador/proxy. Por eso /run lo ejecuta en un hilo y
 # responde de inmediato; el front consulta /status por sondeo. Requiere que
