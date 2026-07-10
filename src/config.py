@@ -183,6 +183,13 @@ class Settings:
     auto_apply_within_band: bool = field(
         default_factory=lambda: os.getenv("AUTO_APPLY_WITHIN_BAND", "true").lower() == "true"
     )
+    # Cuando el WH tiene una marca/modelo distintivo y NINGUNA aparición interna la
+    # comparte (cruce genérico/otra marca, p.ej. WH 'Sanitario aquaplus' vs consolidado
+    # 'Sanitario Corona'), preferir la búsqueda en internet con Gemini del producto
+    # exacto en vez de usar el precio de otra marca.
+    prefer_web_on_brand_mismatch: bool = field(
+        default_factory=lambda: os.getenv("PREFER_WEB_ON_BRAND_MISMATCH", "true").lower() == "true"
+    )
     # Resolver el redirect de Vertex (vertexaisearch.../grounding-api-redirect/...)
     # al enlace DIRECTO de la fuente. Añade una petición HTTP por fuente.
     gemini_resolve_links: bool = field(

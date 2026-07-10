@@ -35,6 +35,7 @@ COL_GRUPO = "Grupo"
 MATCHABLE_GROUPS = {"material", "mano de obra", "transporte", "equipo"}
 
 # Segmentación del análisis en tres categorías de costo.
+import re
 import re as _re
 
 def _cop(x) -> str:
@@ -141,6 +142,108 @@ def _resolve_col(df, wanted: str) -> Optional[str]:
         if nc and (w in nc or nc in w):
             return c
     return None
+
+
+_UNIT_CANON = {"gl", "kg", "m", "l", "und", "in", "mm", "cm", "g", "ml", "paq", "cunete", "m2", "m3"}
+# Señales de que una aparición es OTRA presentación (multi-cantidad / fracción).
+_MULT_RE = re.compile(
+    r"(\bx\s*\d+\b|\b\d+\s*(?:gl|gal|galones?|canecas?|cunetes?|cu[nñ]etes?|kg|kilos?|litros?)\b"
+    r"|\bcaneca\b|\bcu[nñ]ete\b|\bdoble\b|\bmedi[ao]\b|\b\d+/\d+\b)"
+)
+
+
+def _canon_unit(u):
+    """Unidad canónica (gl, kg, m, und, ...) a partir de un texto de unidad."""
+    n = normalize(u)
+    for t in n.split():
+        if t in _UNIT_CANON:
+            return t
+    toks = n.split()
+    return toks[0] if toks else ""
+
+
+def _tiene_multiplicador(texto):
+    return bool(_MULT_RE.search(normalize(texto)))
+
+
+_GENERIC_DESCRIPTORS = {
+    "blanco", "blanca", "negro", "negra", "gris", "azul", "rojo", "roja", "verde",
+    "amarillo", "amarilla", "beige", "marron", "cafe", "dorado", "plateado", "cromado",
+    "claro", "oscuro", "transparente", "natural", "grande", "pequeno", "mediano", "chico",
+    "tipo", "standard", "estandar", "comun", "sencillo", "doble", "para", "con", "sin",
+    "alta", "baja", "mate", "brillante", "liso", "lisa", "plano", "plana", "redondo",
+}
+
+
+def _ref_estandarizada(apariciones, wh_und, wh_desc, valor_wh_proj=None, max_ratio=3.0):
+    """Referencia = MÁXIMO sin outliers, pero PRIORIZANDO por relevancia:
+      T0: misma unidad + comparte token distintivo (marca/modelo) del WH + misma presentación
+      T1: misma unidad + misma presentación
+      T2: misma presentación (cualquier unidad)
+      T3: todas
+    Se usa el primer nivel NO vacío. Dentro del nivel: se prioriza cercanía a la BD,
+    se quitan outliers y se toma el máximo.
+    'apariciones' = lista de dicts {precio, unidad, descripcion}.
+    Devuelve (ref, n_usadas, n_out, n_lejos, unidad_no_coincide, marca_no_coincide)."""
+    import statistics
+    aps = [a for a in (apariciones or []) if a.get("precio") and float(a["precio"]) > 0]
+    if not aps:
+        return None, 0, 0, 0, False, False
+
+    wh_u = _canon_unit(wh_und)
+    wh_toks = [t for t in normalize(wh_desc).split() if len(t) >= 4]
+    # tokens distintivos = marca/modelo: se excluyen el sustantivo cabeza (primero) y
+    # los descriptores genéricos (colores, adjetivos), que no identifican la marca.
+    distintivos = {t for t in wh_toks[1:] if t not in _GENERIC_DESCRIPTORS}
+    wh_mult = _tiene_multiplicador(wh_desc)
+
+    for a in aps:
+        au = _canon_unit(a.get("unidad", ""))
+        a_toks = set(normalize(a.get("descripcion", "")).split())
+        a["_unit_ok"] = bool(wh_u) and au == wh_u
+        a["_token_ok"] = bool(distintivos) and bool(distintivos & a_toks)
+        a["_pres_ok"] = (_tiene_multiplicador(a.get("descripcion", "")) == wh_mult)
+
+    def _tier(pred):
+        return [a for a in aps if pred(a)]
+
+    t0 = _tier(lambda a: a["_unit_ok"] and a["_token_ok"] and a["_pres_ok"])
+    t1 = _tier(lambda a: a["_unit_ok"] and a["_pres_ok"])
+    t2 = _tier(lambda a: a["_pres_ok"])
+    if t0:
+        usados_ap = t0
+    elif t1:
+        usados_ap = t1
+    elif t2:
+        usados_ap = t2
+    else:
+        usados_ap = aps
+
+    unidad_no_coincide = not any(a["_unit_ok"] for a in usados_ap)
+    marca_no_coincide = bool(distintivos) and not any(a["_token_ok"] for a in usados_ap)
+
+    ps = sorted(float(a["precio"]) for a in usados_ap)
+    usados = ps
+    n_out = 0
+    if len(ps) >= 4:
+        q1 = statistics.quantiles(ps, n=4)[0]
+        q3 = statistics.quantiles(ps, n=4)[2]
+        iqr = q3 - q1
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        filt = [p for p in ps if lo <= p <= hi]
+        if filt:
+            n_out = len(ps) - len(filt)
+            usados = filt
+    n_lejos = 0
+    if valor_wh_proj and max_ratio and float(valor_wh_proj) > 0:
+        lo_b = float(valor_wh_proj) / float(max_ratio)
+        hi_b = float(valor_wh_proj) * float(max_ratio)
+        cerca = [p for p in usados if lo_b <= p <= hi_b]
+        if cerca:
+            n_lejos = len(usados) - len(cerca)
+            usados = cerca
+    ref = round(max(usados), 2)
+    return ref, len(usados), n_out, n_lejos, unidad_no_coincide, marca_no_coincide
 
 
 def _ref_maximo_sin_outliers(precios, valor_wh_proj=None, max_ratio=3.0):
@@ -614,20 +717,32 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                         "precio_real_max": round(float(sub["precio"].max()), 2),
                     })
 
-        # Precio de referencia (MÉTODO ÚNICO): promedio de TODAS las apariciones
-        # (consolidado + comparativos juntas), quitando OUTLIERS estadísticos y
-        # PRIORIZANDO los valores cercanos a la BD. Si no hay ninguna aparición, se
-        # intenta la búsqueda web (Gemini).
+        # Precio de referencia estandarizado: MÁXIMO sin outliers, priorizando por
+        # UNIDAD, MARCA/modelo y misma PRESENTACIÓN, y cercanía a la BD. Si no hay
+        # apariciones, o el cruce es de otra marca, se va a la búsqueda web (Gemini).
         ref_es_web = False
         web_intentado = False
-        precios_pool = []
-        if not con_all.empty:
-            precios_pool += [float(x) for x in con_all["precio"].tolist() if x and float(x) > 0]
-        if not cot_full.empty:
-            precios_pool += [float(x) for x in cot_full["precio"].tolist() if x and float(x) > 0]
-        ref_val, n_usadas, n_out, n_lejos = _ref_maximo_sin_outliers(
-            precios_pool, valor_wh_proj, settings.max_price_ratio
+        apariciones = []
+        for df in (con_all, cot_full):
+            if not df.empty:
+                for _, ar in df.iterrows():
+                    apariciones.append({
+                        "precio": ar.get("precio"),
+                        "unidad": ar.get("unidad", ""),
+                        "descripcion": ar.get("descripcion", ""),
+                    })
+        ref_val, n_usadas, n_out, n_lejos, unidad_no_coincide, marca_no_coincide = _ref_estandarizada(
+            apariciones, und, desc, valor_wh_proj, settings.max_price_ratio
         )
+        # Si el WH tiene marca/modelo distintivo y NINGUNA aparición la comparte
+        # (cruce de otra marca), se descarta la referencia interna y se busca el
+        # producto exacto en internet con Gemini.
+        rutear_web_marca = (
+            ref_val is not None and marca_no_coincide
+            and settings.prefer_web_on_brand_mismatch
+        )
+        if rutear_web_marca:
+            ref_val = None
         if ref_val is not None:
             precio_ref = ref_val
             # Fuente/enlace: la aparición cuyo precio queda MÁS CERCA de la referencia.
@@ -641,8 +756,10 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                 prov_ref = fr.get("proveedor", "")
             except Exception:
                 pass
-            tipo_ref = "Máximo sin outliers (todas las apariciones, prioriza cercanas a la BD)"
+            tipo_ref = "Máximo sin outliers (prioriza unidad, marca y cercanía a la BD)"
             detalle = []
+            if unidad_no_coincide:
+                detalle.append("sin apariciones de la misma unidad (se usó lo disponible)")
             if n_out:
                 detalle.append(f"{n_out} outlier(s) estadístico(s) excluido(s)")
             if n_lejos:
@@ -678,10 +795,14 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         else:
             precio_ref = None
             fuente_ref = tipo_ref = link_ref = region_ref = prov_ref = None
-            de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
+            if rutear_web_marca:
+                de_donde = ("Cruce interno de otra marca/modelo (no coincide con el WH); "
+                            "se busca el producto exacto en internet.")
+            else:
+                de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
             # --- FALLBACK: investigación de precio en internet con Gemini ---
-            # Sin ninguna referencia interna: buscar en internet.
+            # Sin referencia interna utilizable (o cruce de otra marca): buscar en internet.
             if (
                 es_procesable
                 and gemini_price is not None
@@ -690,8 +811,10 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             ):
                 web_intentado = True
                 n_price_research += 1
+                ctx = ("Cruce interno de otra marca. " if rutear_web_marca
+                       else "Sin fuente interna utilizable. ")
                 wr = _investigar_web(gemini_price, desc, und, valor_wh_proj, settings,
-                                     contexto="Sin fuente interna utilizable. ")
+                                     contexto=ctx)
                 if wr is not None:
                     precio_ref = wr["precio_ref"]; ref_es_web = True
                     tipo_ref = wr["tipo_ref"]; fuente_ref = wr["fuente_ref"]
