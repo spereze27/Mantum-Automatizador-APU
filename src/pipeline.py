@@ -172,6 +172,12 @@ _GENERIC_DESCRIPTORS = {
     "claro", "oscuro", "transparente", "natural", "grande", "pequeno", "mediano", "chico",
     "tipo", "standard", "estandar", "comun", "sencillo", "doble", "para", "con", "sin",
     "alta", "baja", "mate", "brillante", "liso", "lisa", "plano", "plana", "redondo",
+    # descriptores de construcción frecuentes (NO son marca)
+    "recta", "recto", "galv", "galvanizado", "galvanizada", "presion", "sanitaria",
+    "sanitario", "cabeza", "lenteja", "punta", "broca", "rosca", "corrugado", "corrugada",
+    "liviano", "liviana", "pesado", "pesada", "flexible", "rigido", "rigida", "macho",
+    "hembra", "union", "codo", "tee", "reducida", "larga", "corta", "ancha", "angosta",
+    "profesional", "industrial", "reforzado", "reforzada", "estructural",
 }
 
 
@@ -734,16 +740,34 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         ref_val, n_usadas, n_out, n_lejos, unidad_no_coincide, marca_no_coincide = _ref_estandarizada(
             apariciones, und, desc, valor_wh_proj, settings.max_price_ratio
         )
-        # Si el WH tiene marca/modelo distintivo y NINGUNA aparición la comparte
-        # (cruce de otra marca), se descarta la referencia interna y se busca el
-        # producto exacto en internet con Gemini.
-        rutear_web_marca = (
-            ref_val is not None and marca_no_coincide
-            and settings.prefer_web_on_brand_mismatch
-        )
-        if rutear_web_marca:
-            ref_val = None
-        if ref_val is not None:
+        # Ruteo por marca a Gemini SOLO cuando importa: el WH tiene marca distintiva,
+        # ninguna aparición la comparte, Y la referencia interna está LEJOS de la BD
+        # (si estuviera cerca, el precio es razonable y no vale la pena arriesgar). Es
+        # NO DESTRUCTIVO: si Gemini no encuentra el producto, se conserva el interno.
+        ref_lejos_bd = False
+        if ref_val is not None and valor_wh_proj and valor_wh_proj > 0:
+            rr = ref_val / valor_wh_proj
+            umbral = 1.0 + settings.suspicious_pct_threshold / 100.0
+            ref_lejos_bd = rr > umbral or rr < 1.0 / umbral
+        usar_web = None
+        if (
+            ref_val is not None and marca_no_coincide and ref_lejos_bd
+            and settings.prefer_web_on_brand_mismatch and es_procesable
+            and gemini_price is not None
+            and (settings.gemini_price_max_items <= 0
+                 or n_price_research < settings.gemini_price_max_items)
+        ):
+            web_intentado = True
+            n_price_research += 1
+            usar_web = _investigar_web(gemini_price, desc, und, valor_wh_proj, settings,
+                                       contexto="Cruce interno de otra marca. ")
+
+        if usar_web is not None:
+            precio_ref = usar_web["precio_ref"]; ref_es_web = True
+            tipo_ref = usar_web["tipo_ref"]; fuente_ref = usar_web["fuente_ref"]
+            link_ref = usar_web["link_ref"]; region_ref = usar_web["region_ref"]
+            prov_ref = usar_web["prov_ref"]; de_donde = usar_web["de_donde"]
+        elif ref_val is not None:
             precio_ref = ref_val
             # Fuente/enlace: la aparición cuyo precio queda MÁS CERCA de la referencia.
             fuente_ref = link_ref = region_ref = prov_ref = None
@@ -787,34 +811,30 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                         f"mín {_cop(round(qp.min(),2))})"
                     )
             desglose_txt = (" Desglose: " + "; ".join(desglose) + "." if desglose else "")
+            marca_txt = (" Nota: posible otra marca (sin coincidencia de marca en fuentes internas); "
+                         "se conserva el interno." if marca_no_coincide else "")
             de_donde = (
                 f"Máximo de {n_usadas} aparición(es) (consolidado + comparativos), "
                 f"sin outliers y priorizando cercanas a la BD ({_cop(valor_wh_proj)}): "
-                f"{_cop(precio_ref)}.{extra}{desglose_txt}"
+                f"{_cop(precio_ref)}.{extra}{desglose_txt}{marca_txt}"
             )
         else:
             precio_ref = None
             fuente_ref = tipo_ref = link_ref = region_ref = prov_ref = None
-            if rutear_web_marca:
-                de_donde = ("Cruce interno de otra marca/modelo (no coincide con el WH); "
-                            "se busca el producto exacto en internet.")
-            else:
-                de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
+            de_donde = "Sin fuente que refute (se mantiene valor del warehouse × IPC)"
 
             # --- FALLBACK: investigación de precio en internet con Gemini ---
-            # Sin referencia interna utilizable (o cruce de otra marca): buscar en internet.
+            # Sin ninguna referencia interna: buscar en internet.
             if (
-                es_procesable
+                es_procesable and not web_intentado
                 and gemini_price is not None
                 and (settings.gemini_price_max_items <= 0
                      or n_price_research < settings.gemini_price_max_items)
             ):
                 web_intentado = True
                 n_price_research += 1
-                ctx = ("Cruce interno de otra marca. " if rutear_web_marca
-                       else "Sin fuente interna utilizable. ")
                 wr = _investigar_web(gemini_price, desc, und, valor_wh_proj, settings,
-                                     contexto=ctx)
+                                     contexto="Sin fuente interna utilizable. ")
                 if wr is not None:
                     precio_ref = wr["precio_ref"]; ref_es_web = True
                     tipo_ref = wr["tipo_ref"]; fuente_ref = wr["fuente_ref"]
