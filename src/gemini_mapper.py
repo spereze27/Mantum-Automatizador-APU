@@ -38,12 +38,16 @@ def _build_backend(api_key, project, location, model_name):
         print(f"[gemini] SDK google-genai no disponible: {exc}")
         return None, None, None
 
-    # Timeout corto y SIN reintentos: si no hay cuota (429) o hay error, que falle
-    # RÁPIDO (lo combinamos con el circuit breaker de cada clase).
+    # Reintentos con backoff SOLO en errores transitorios (429 rate-limit, 503, 500):
+    # así un pico de rate-limit no tumba la corrida. Si es cuota agotada de verdad,
+    # el circuit breaker (con cooldown) de cada clase acota el tiempo perdido.
     try:
         http = gtypes.HttpOptions(
             timeout=20000,  # ms
-            retry_options=gtypes.HttpRetryOptions(attempts=1),
+            retry_options=gtypes.HttpRetryOptions(
+                attempts=3, initial_delay=1.0, max_delay=8.0, exp_base=2.0,
+                http_status_codes=[429, 500, 503],
+            ),
         )
     except Exception:  # versiones viejas del SDK sin esos campos
         http = None
@@ -368,7 +372,9 @@ class GeminiPriceResearcher:
         )
         self.enabled = self._client is not None
         self._fail_streak = 0
-        self._max_fails = 3
+        self._max_fails = 5
+        self._paused = 0
+        self._cooldown = 40
 
     @staticmethod
     def _to_cop(value) -> Optional[float]:
@@ -406,6 +412,9 @@ class GeminiPriceResearcher:
     def research_price(self, item: str, unit: str = "", referencia_bd=None,
                        resolve_links: bool = True) -> Optional[PriceResearch]:
         if not self.enabled or not str(item).strip():
+            return None
+        if self._paused > 0:
+            self._paused -= 1  # en cooldown tras varios fallos: se salta esta llamada
             return None
         key = f"{str(item).strip().lower()}|{str(unit).strip().lower()}"
         if key in self._cache:
@@ -458,9 +467,10 @@ class GeminiPriceResearcher:
             self._fail_streak += 1
             print(f"[gemini-precio] error investigando '{str(item)[:40]}': {exc}")
             if self._fail_streak >= self._max_fails:
-                self.enabled = False
-                print(f"[gemini-precio] DESHABILITADO tras {self._fail_streak} fallos "
-                      f"seguidos (¿sin cuota / sin permiso aiplatform?).")
+                self._paused = self._cooldown
+                self._fail_streak = 0
+                print(f"[gemini-precio] EN PAUSA {self._cooldown} llamadas tras varios "
+                      f"fallos seguidos (rate-limit/cuota); reintentará luego.")
             result = None
         self._cache[key] = result
         return result
