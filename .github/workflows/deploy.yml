@@ -83,3 +83,5 @@ jobs:
             --set-env-vars "SUSPICIOUS_PCT_THRESHOLD=50" \
             --set-env-vars "GEMINI_RESOLVE_LINKS=true" \
             --set-env-vars "DRY_RUN=false"
+            --set-env-vars "GEMINI_MIN_INTERVAL_SEC=1.5" \
+            --set-env-vars "IVA_PCT=19" \

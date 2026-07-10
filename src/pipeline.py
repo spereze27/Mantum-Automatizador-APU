@@ -482,6 +482,8 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             location=settings.gemini_location,
             model_name=settings.gemini_model,
             api_key=settings.gemini_api_key or None,
+            min_interval_sec=settings.gemini_min_interval_sec,
+            iva_pct=settings.iva_pct,
         )
         if not gemini_price.enabled:
             gemini_price = None

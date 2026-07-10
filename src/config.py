@@ -190,6 +190,13 @@ class Settings:
     prefer_web_on_brand_mismatch: bool = field(
         default_factory=lambda: os.getenv("PREFER_WEB_ON_BRAND_MISMATCH", "true").lower() == "true"
     )
+    # Intervalo mínimo (segundos) entre llamadas a Gemini, para no exceder el rate-limit
+    # de Vertex (grounding) y evitar 429 RESOURCE_EXHAUSTED. 0 = sin throttle.
+    gemini_min_interval_sec: float = field(
+        default_factory=lambda: float(os.getenv("GEMINI_MIN_INTERVAL_SEC", "0"))
+    )
+    # % de IVA a descontar cuando la fuente web reporta el precio CON IVA incluido.
+    iva_pct: float = field(default_factory=lambda: float(os.getenv("IVA_PCT", "19")))
     # Resolver el redirect de Vertex (vertexaisearch.../grounding-api-redirect/...)
     # al enlace DIRECTO de la fuente. Añade una petición HTTP por fuente.
     gemini_resolve_links: bool = field(

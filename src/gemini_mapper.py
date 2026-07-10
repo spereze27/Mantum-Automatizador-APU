@@ -68,6 +68,13 @@ def _build_backend(api_key, project, location, model_name):
         return None, None, None
 
 
+def _fmt(x):
+    try:
+        return "$" + format(int(round(float(x))), ",d").replace(",", ".")
+    except Exception:
+        return str(x)
+
+
 def _parse_json(text: str) -> Optional[dict]:
     if not text:
         return None
@@ -339,15 +346,18 @@ Reglas IMPORTANTES:
   calculo = "$12.000/m × 6 m = $72.000". Usa el escalado SOLO cuando no exista la
   presentación exacta, y solo si el escalado es razonable (lineal); no escales si el
   precio no es proporcional (p.ej. accesorios, equipos). Indica "escalado": true.
-- Si el precio típico incluye IVA, da el valor ANTES de IVA si puedes estimarlo; si
-  no, deja el precio tal cual y acláralo en "notas".
+- IVA: la mayoría de los precios de venta al público en Colombia se muestran CON IVA
+  (19%) incluido. Indica en "iva_incluido" si el precio que reportas incluye IVA, y en
+  "iva_pct" el porcentaje (normalmente 19). NO descuentes tú el IVA: solo reporta el
+  precio tal como aparece y marca si lo incluye; el sistema hará el descuento.
 - Si hay varias fuentes creíbles con precio explícito{ref_pref}, elige la MÁS
   representativa; NO inventes ni fuerces un valor para que coincida.
 - Si NO encuentras un precio creíble y EXPLÍCITO (ni directo ni escalable), responde
   precio = null.
 
 Responde al final SOLO un JSON válido con esta forma (sin texto extra después):
-{{"precio": <número COP final o null>, "unidad": "<unidad del ítem>",
+{{"precio": <número COP tal como aparece o null>, "unidad": "<unidad del ítem>",
+  "iva_incluido": <true/false>, "iva_pct": <número, normalmente 19>,
   "precio_base": <número COP de la unidad base o null>, "unidad_base": "<unidad base>",
   "escalado": <true/false>, "calculo": "<cómo se calculó, p.ej. $12.000/m × 6 m>",
   "fuente_url": "<enlace a la ficha con el precio>", "fuente_nombre": "<comercio/fuente>",
@@ -365,6 +375,8 @@ class GeminiPriceResearcher:
         location: str = "us-central1",
         model_name: str = "gemini-2.5-flash",
         api_key: Optional[str] = None,
+        min_interval_sec: float = 0.0,
+        iva_pct: float = 19.0,
     ) -> None:
         self._cache: dict[str, Optional[PriceResearch]] = {}
         self._client, self._model_name, self._types = _build_backend(
@@ -375,6 +387,9 @@ class GeminiPriceResearcher:
         self._max_fails = 5
         self._paused = 0
         self._cooldown = 40
+        self._min_interval = max(0.0, float(min_interval_sec))  # throttle entre llamadas
+        self._last_call = 0.0
+        self._iva_pct = float(iva_pct)
 
     @staticmethod
     def _to_cop(value) -> Optional[float]:
@@ -433,6 +448,14 @@ class GeminiPriceResearcher:
         prompt = _PRICE_PROMPT.format(item=item, unit=unit or "",
                                       ref_linea=ref_linea, ref_pref=ref_pref)
         result: Optional[PriceResearch] = None
+        # Throttle: respeta un intervalo mínimo entre llamadas para no exceder el
+        # rate-limit de Vertex (grounding) y evitar los 429 RESOURCE_EXHAUSTED.
+        if self._min_interval > 0:
+            import time as _time
+            dt = _time.monotonic() - self._last_call
+            if dt < self._min_interval:
+                _time.sleep(self._min_interval - dt)
+            self._last_call = _time.monotonic()
         try:
             t = self._types
             resp = self._client.models.generate_content(
@@ -446,17 +469,31 @@ class GeminiPriceResearcher:
             if data is not None:
                 precio = self._to_cop(data.get("precio"))
                 if precio is not None:
+                    # IVA: si la fuente reporta el precio CON IVA incluido, se descuenta
+                    # para dejar el valor ANTES de IVA (comparable con la BD).
+                    iva_txt = ""
+                    if bool(data.get("iva_incluido", False)):
+                        try:
+                            ivp = float(data.get("iva_pct") or self._iva_pct)
+                        except Exception:
+                            ivp = self._iva_pct
+                        if ivp > 0:
+                            precio_con = precio
+                            precio = round(precio / (1.0 + ivp / 100.0), 2)
+                            iva_txt = (f" (precio con IVA {_fmt(precio_con)}; se descontó "
+                                       f"{ivp:.0f}% de IVA → {_fmt(precio)})")
                     raw = _best_grounding_url(resp) or ""
                     model_url = str(data.get("fuente_url", "") or "")
                     url = _pick_url(raw, model_url, resolve_links)
                     nombre = _grounding_titles(resp) or str(data.get("fuente_nombre", "") or "Referencia web").strip()
+                    notas = (str(data.get("notas", "") or "") + iva_txt)[:260]
                     result = PriceResearch(
                         precio=precio,
                         unidad=str(data.get("unidad", "") or unit or "").strip(),
                         fuente_url=url,
                         fuente_nombre=nombre,
                         confianza=float(data.get("confidence", 0) or 0),
-                        notas=str(data.get("notas", "") or "")[:200],
+                        notas=notas,
                         producto=str(data.get("producto", "") or "")[:160],
                         calculo=str(data.get("calculo", "") or "").strip()[:200],
                         precio_base=self._to_cop(data.get("precio_base")),
