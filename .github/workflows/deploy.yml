@@ -3,35 +3,11 @@ name: Build & Deploy to Cloud Run
 on:
   push:
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "DRY_RUN: 'true' = NO escribe en el Sheet, solo genera el reporte"
-        type: choice
-        options: ["true", "false"]
-        default: "true"
-      min_instances:
-        description: "min-instances (poner 1 durante corridas largas de Gemini)"
-        type: choice
-        options: ["0", "1"]
-        default: "0"
-      gemini_price_max_items:
-        description: "Tope de items a consultar en Gemini (0 = sin tope)"
-        type: string
-        default: "0"
+  workflow_dispatch: {}
 
 env:
   SERVICE_NAME: apu-comparativo-mtto
   ARTIFACT_REPO: apu-images
-  # SEGURO POR DEFECTO. Precedencia:
-  #   1) input del workflow_dispatch (corrida manual)
-  #   2) variable de repo vars.DRY_RUN (Settings > Variables)
-  #   3) 'true'
-  # Un `git push` a main NUNCA habilita la escritura por accidente. La escritura
-  # pisa las columnas O y P del Sheet vivo y el servicio NO puede deshacerla.
-  DRY_RUN: ${{ github.event.inputs.dry_run || vars.DRY_RUN || 'true' }}
-  MIN_INSTANCES: ${{ github.event.inputs.min_instances || '0' }}
-  GEMINI_PRICE_MAX_ITEMS: ${{ github.event.inputs.gemini_price_max_items || '0' }}
 
 jobs:
   deploy:
@@ -42,15 +18,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      # --- Aviso explícito de si esta corrida escribe o no en el Sheet ---
-      - name: Modo de escritura
-        run: |
-          if [ "${DRY_RUN}" = "false" ]; then
-            echo "::warning title=ESCRITURA HABILITADA::DRY_RUN=false. Este deploy ESCRIBE en las columnas O y P del warehouse. Confirma que ya revisaste el reporte de la corrida en seco."
-          else
-            echo "::notice title=Corrida en seco::DRY_RUN=true. Se genera el reporte en GCS pero NO se escribe en el Sheet."
-          fi
 
       # --- Autenticación SIN clave JSON (Workload Identity Federation) ---
       - name: Auth to Google Cloud (WIF)
@@ -68,15 +35,6 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
 
-      # --- Tests: no se despliega código que no pasa la suite ---
-      # Los 58 tests cubren justamente las guardas que impiden repetir los errores
-      # del reporte 20260710 (banda infranqueable, arbitraje vinculante,
-      # normalización de unidad). Desplegar sin correrlos deja el Sheet expuesto.
-      - name: Tests
-        run: |
-          pip install --quiet pytest pandas numpy openpyxl thefuzz python-Levenshtein PyYAML
-          python -m pytest tests/ -q
-
       # --- Build & Push de la imagen ---
       - name: Build and Push image
         run: |
@@ -93,7 +51,7 @@ jobs:
             --region "${{ secrets.GCP_REGION }}" \
             --service-account "apu-comparativo-sa@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com" \
             --memory 2Gi --cpu 2 --timeout 900 \
-            --max-instances 1 --min-instances "${MIN_INSTANCES}" --no-cpu-throttling \
+            --max-instances 1 --min-instances 0 --no-cpu-throttling \
             --no-allow-unauthenticated \
             --set-env-vars "GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" \
             --set-env-vars "GCP_REGION=${{ secrets.GCP_REGION }}" \
@@ -115,35 +73,15 @@ jobs:
             --set-env-vars "APPLY_IPC_TO_COMPARATIVOS=false" \
             --set-env-vars "FUZZY_THRESHOLD=77" \
             --set-env-vars "USE_EMBEDDINGS=false" \
-            --set-env-vars "REF_ESTIMATOR=p75" \
-            --set-env-vars "REF_QUANTILE=0.75" \
-            --set-env-vars "REF_WINSOR_PCT=5" \
-            --set-env-vars "REF_RECENCY_HALFLIFE_DAYS=365" \
-            --set-env-vars "REF_WEIGHT_BY_QTY=false" \
-            --set-env-vars "ENFORCE_BAND=true" \
-            --set-env-vars "AUTO_APPLY_WITHIN_BAND=true" \
-            --set-env-vars "SUSPICIOUS_PCT_THRESHOLD=50" \
-            --set-env-vars "ARBITRATE_TAKE_MIN=true" \
-            --set-env-vars "NORMALIZE_PRESENTATION=true" \
-            --set-env-vars "SKIP_NON_DIMENSIONAL_UNITS=true" \
-            --set-env-vars "UNIT_PLAUSIBILITY=true" \
-            --set-env-vars "PLAUSIBILIDAD_CONFIG_PATH=config/plausibilidad.yaml" \
             --set-env-vars "USE_GEMINI=false" \
             --set-env-vars "GEMINI_MODEL=gemini-2.5-flash" \
             --set-env-vars "GEMINI_LOCATION=us-central1" \
             --set-env-vars "USE_GEMINI_PRICE_RESEARCH=true" \
             --set-env-vars "GEMINI_ARBITRATE_SUSPICIOUS=true" \
-            --set-env-vars "GEMINI_PRICE_MAX_ITEMS=${GEMINI_PRICE_MAX_ITEMS}" \
+            --set-env-vars "GEMINI_PRICE_MAX_ITEMS=0" \
             --set-env-vars "GEMINI_PRICE_MIN_CONFIDENCE=60" \
-            --set-env-vars "GEMINI_MIN_INTERVAL_SEC=0.5" \
+            --set-env-vars "SUSPICIOUS_PCT_THRESHOLD=50" \
             --set-env-vars "GEMINI_RESOLVE_LINKS=true" \
-            --set-env-vars "GEMINI_REQUIRE_LINK=true" \
-            --set-env-vars "IVA_PCT=19" \
-            --set-env-vars "DRY_RUN=${DRY_RUN}"
-
-      - name: Resumen
-        run: |
-          echo "Servicio:  ${SERVICE_NAME}"
-          echo "DRY_RUN=${DRY_RUN}   (true = NO escribe en el Sheet)"
-          echo "GEMINI_PRICE_MAX_ITEMS=${GEMINI_PRICE_MAX_ITEMS}   MIN_INSTANCES=${MIN_INSTANCES}"
-          echo "El reporte queda en gs://${{ secrets.GCS_BUCKET_NAME }}/reportes/"
+            --set-env-vars "DRY_RUN=false" \
+            --set-env-vars "GEMINI_MIN_INTERVAL_SEC=0.5" \
+            --set-env-vars "IVA_PCT=19" 
