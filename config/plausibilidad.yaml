@@ -1,0 +1,77 @@
+# Guardarraíl ABSOLUTO de precio unitario (COP, antes de IVA).
+#
+# Para qué sirve: la banda de cordura [BD/ratio, BD*ratio] ancla la referencia al
+# warehouse. Pero cuando el warehouse ESTÁ MAL, la banda no protege. Estas reglas
+# son el único chequeo que no depende ni de la BD ni de Gemini.
+#
+# Caso real que motivó esto (reporte 20260710): "Cemento 50 Kg", unidad Kg.
+#   - BD: $1.166/Kg (correcto: 58.300 / 50)
+#   - Máximo interno: $35.500 (precio del BULTO, no del Kg)
+#   - Gemini buscó "Cemento 50 Kg" y devolvió $26.807 (precio del BULTO)
+#   -> el arbitraje "verificó" el máximo y aplicó $35.500/Kg = 30x.
+# Con esta regla (cemento/kg entre 700 y 4.000) esa referencia se rechaza sola.
+#
+# Cómo mantenerlo: agrega una regla por familia de ítem de alto consumo. Es
+# deliberadamente CONSERVADOR (rangos anchos): solo debe atrapar errores de
+# ORDEN DE MAGNITUD, no discutir precios. Si no hay regla, no se bloquea nada.
+#
+#   patron: regex sobre la descripción (sin tildes, minúsculas)
+#   unidad: unidad canónica (kg, gl, m3, m2, m, und, hr, dia, l)
+#   min/max: rango del precio por ESA unidad
+
+reglas:
+  # --- Cementos y aglomerantes (por kilo) ---
+  - nombre: Cemento gris/blanco por kg
+    patron: '\bcement'
+    unidad: kg
+    min: 500
+    max: 5000
+
+  - nombre: Pegante/mortero/pegacor por kg
+    patron: '\b(pegacor|pegante|mortero|pegamento cer|estuco)'
+    unidad: kg
+    min: 800
+    max: 15000
+
+  # --- Agregados (por m3) ---
+  - nombre: Arena / gravilla / base granular por m3
+    patron: '\b(arena|gravilla|triturado|base granular|sub ?base|recebo)'
+    unidad: m3
+    min: 40000
+    max: 400000
+
+  # --- Pinturas y recubrimientos (por galón) ---
+  - nombre: Pintura / esmalte / viniltex por galón
+    patron: '\b(viniltex|pintura|esmalte|koraza|vinilo|anticorrosiv|pintulux)'
+    unidad: gl
+    min: 40000
+    max: 400000
+
+  - nombre: Thinner / disolvente por litro
+    patron: '\b(thinner|disolvente|varsol)'
+    unidad: l
+    min: 5000
+    max: 60000
+
+  # --- Mano de obra (por hora) ---
+  # Referencia: SMMLV 2026 + prestaciones. Un ayudante por encima de $30.000/h
+  # o por debajo de $6.000/h es un error de cruce, no un precio.
+  - nombre: Mano de obra por hora
+    patron: '\b(ayudante|oficial|maestro|obrero|operario|soldador|pintor|electricista|plomero)'
+    unidad: hr
+    min: 6000
+    max: 40000
+
+  - nombre: Mano de obra por jornal/día
+    patron: '\b(ayudante|oficial|maestro|obrero|operario)'
+    unidad: dia
+    min: 50000
+    max: 350000
+
+  # --- Ferretería menor (por unidad) ---
+  # El tornillo estructural entró a $5.042/Und (29x) avalado por Gemini.
+  - nombre: Tornillo / chazo / puntilla / remache por unidad
+    patron: '\b(tornillo|chazo|puntilla|remache|clavo|arandela|tuerca)'
+    unidad: und
+    min: 30
+    max: 3000

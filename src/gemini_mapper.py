@@ -175,44 +175,81 @@ def _is_bad_link(u: str) -> bool:
     )
 
 
-def _follow(url: str, timeout: float = 6.0) -> str:
-    """Sigue la redirección HTTP y devuelve la URL final (sea cual sea) o ''."""
+def _all_grounding_urls(resp) -> list:
+    """TODOS los enlaces de grounding, con el que cita un precio primero. Antes solo
+    se intentaba resolver UNO; si ese fallaba, el reporte se quedaba con el redirect
+    de vertexaisearch (106 de 375 referencias web del reporte 20260710)."""
+    urls = []
+    best = _best_grounding_url(resp)
+    if best:
+        urls.append(best)
     try:
-        import requests
-        r = requests.get(url, allow_redirects=True, timeout=timeout, stream=True,
-                         headers={"User-Agent": "Mozilla/5.0"})
-        final = r.url
+        gm = getattr(resp.candidates[0], "grounding_metadata", None)
+        for ch in (getattr(gm, "grounding_chunks", None) or []):
+            web = getattr(ch, "web", None)
+            uri = getattr(web, "uri", None) if web else None
+            if uri and uri not in urls:
+                urls.append(uri)
+    except Exception:
+        pass
+    return urls
+
+
+def _follow(url: str, timeout: float = 8.0, intentos: int = 2) -> str:
+    """Sigue la redirección HTTP y devuelve la URL final (sea cual sea) o ''.
+    Reintenta: el redirect de Vertex falla de forma intermitente. Prueba primero
+    HEAD (barato) y cae a GET si el servidor no lo soporta."""
+    import time as _t
+    for i in range(max(1, intentos)):
         try:
-            r.close()
-        except Exception:
-            pass
-        return final or ""
-    except Exception as exc:  # pragma: no cover
-        print(f"[gemini-precio] no se pudo resolver el redirect: {exc}")
-        return ""
+            import requests
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; apu-comparativo/1.0)"}
+            r = requests.head(url, allow_redirects=True, timeout=timeout, headers=headers)
+            final = r.url or ""
+            if not final or "grounding-api-redirect" in final or r.status_code >= 400:
+                r = requests.get(url, allow_redirects=True, timeout=timeout,
+                                 stream=True, headers=headers)
+                final = r.url or ""
+                try:
+                    r.close()
+                except Exception:
+                    pass
+            if final and "grounding-api-redirect" not in final:
+                return final
+        except Exception as exc:  # pragma: no cover
+            if i == intentos - 1:
+                print(f"[gemini-precio] no se pudo resolver el redirect: {exc}")
+        _t.sleep(0.4 * (i + 1))
+    return ""
 
 
-def _pick_url(raw: str, model_url: str, resolve_links: bool) -> str:
-    """Elige el mejor enlace al PRODUCTO:
-    1) si el grounding dio un redirect de Vertex, lo resuelve al enlace DIRECTO;
-    2) si ese redirect lleva a una búsqueda de Google/captcha (o no resuelve),
-       usa la ficha del producto que devolvió el modelo (fuente_url);
-    3) como último recurso, conserva el redirect."""
-    raw = raw or ""
+def _pick_url(raw, model_url: str, resolve_links: bool, require_link: bool = False) -> str:
+    """Elige el mejor enlace DIRECTO al producto.
+
+    `raw` puede ser un str o una lista de candidatos de grounding.
+    Orden: 1) resolver cada redirect de Vertex hasta obtener un enlace directo;
+           2) usar la ficha del producto que devolvió el modelo (fuente_url);
+           3) si `require_link`, devolver '' (el precio se RECHAZA) en vez de dejar
+              un enlace inservible de vertexaisearch. Si no, conservar el redirect
+              (comportamiento legacy)."""
+    cands = [raw] if isinstance(raw, str) else list(raw or [])
+    cands = [c for c in cands if c]
     model_url = (model_url or "").strip()
-    is_redirect = "grounding-api-redirect" in raw
-    if resolve_links and is_redirect:
-        final = _follow(raw)
-        if final and not _is_bad_link(final) and "grounding-api-redirect" not in final:
-            return final  # enlace directo verificado
-        if model_url and not _is_bad_link(model_url):
-            return model_url  # ficha del producto dada por el modelo
-        return raw  # último recurso
-    if raw and not _is_bad_link(raw) and not is_redirect:
-        return raw  # ya era directo
+
+    for c in cands:
+        if not _is_bad_link(c) and "grounding-api-redirect" not in c:
+            return c  # ya era directo
+    if resolve_links:
+        for c in cands:
+            if "grounding-api-redirect" in c:
+                final = _follow(c)
+                if final and not _is_bad_link(final):
+                    return final
     if model_url and not _is_bad_link(model_url):
-        return model_url
-    return raw or model_url
+        return model_url  # ficha del producto dada por el modelo
+    if require_link:
+        return ""  # sin respaldo verificable -> el precio no se usa
+    return cands[0] if cands else model_url
 
 
 def _mk_config(t, **kw):
@@ -350,10 +387,16 @@ Reglas IMPORTANTES:
   (19%) incluido. Indica en "iva_incluido" si el precio que reportas incluye IVA, y en
   "iva_pct" el porcentaje (normalmente 19). NO descuentes tú el IVA: solo reporta el
   precio tal como aparece y marca si lo incluye; el sistema hará el descuento.
+- PRESENTACIÓN (crítico): indica SIEMPRE en "producto" el nombre EXACTO con su
+  presentación tal como aparece en la ficha ("Pintura Viniltex Blanco 1/4 Galón",
+  "Cemento Gris Argos x 50 Kg", "Cuñete de 5 Galones"). El sistema convierte ese
+  precio a la unidad del APU; si omites la presentación, la conversión falla y se
+  publica el precio del EMPAQUE como si fuera el precio por unidad.
 - Si hay varias fuentes creíbles con precio explícito{ref_pref}, elige la MÁS
   representativa; NO inventes ni fuerces un valor para que coincida.
-- Si NO encuentras un precio creíble y EXPLÍCITO (ni directo ni escalable), responde
-  precio = null.
+- Si NO encuentras un precio creíble y EXPLÍCITO (ni directo ni escalable), o no
+  puedes dar un ENLACE a la ficha donde se vea el precio, responde precio = null.
+  Un precio sin enlace de respaldo es inútil: preferimos null a un valor sin fuente.
 
 Responde al final SOLO un JSON válido con esta forma (sin texto extra después):
 {{"precio": <número COP tal como aparece o null>, "unidad": "<unidad del ítem>",
@@ -425,7 +468,11 @@ class GeminiPriceResearcher:
             return None
 
     def research_price(self, item: str, unit: str = "", referencia_bd=None,
-                       resolve_links: bool = True) -> Optional[PriceResearch]:
+                       resolve_links: bool = True,
+                       require_link: bool = True) -> Optional[PriceResearch]:
+        """Busca el precio de mercado del ítem. Si `require_link` (default), un precio
+        SIN enlace directo de respaldo se RECHAZA: el negocio exige que todo valor
+        consultado en internet sea auditable contra su fuente."""
         if not self.enabled or not str(item).strip():
             return None
         if self._paused > 0:
@@ -439,10 +486,19 @@ class GeminiPriceResearcher:
         try:
             if referencia_bd and float(referencia_bd) > 0:
                 ref = float(referencia_bd)
-                ref_linea = (f"PRECIO DE REFERENCIA INTERNO (base de datos): "
-                             f"~${ref:,.0f} COP por '{unit or 'unidad'}'.\n")
-                ref_pref = (", prioriza la que esté en un rango razonable del precio de "
-                            "referencia interno (mismo orden de magnitud)")
+                ref_linea = (
+                    f"PRECIO DE REFERENCIA INTERNO (base de datos): ~${ref:,.0f} COP "
+                    f"por 1 '{unit or 'unidad'}'. El precio que reportes debe ser por "
+                    f"esa MISMA unidad. Si la ficha vende otra presentación (un bulto, "
+                    f"un cuñete, 1/4 de galón), dilo en 'producto' y en 'calculo'.\n"
+                )
+                ref_pref = (
+                    ", PRIORIZA la fuente cuyo precio quede CERCA del precio de "
+                    "referencia interno (mismo orden de magnitud). Un precio que se "
+                    "aleja 10x o más de la referencia casi siempre significa que estás "
+                    "mirando OTRA PRESENTACIÓN (el empaque completo) o el producto "
+                    "equivocado: revísalo antes de responder"
+                )
         except Exception:
             pass
         prompt = _PRICE_PROMPT.format(item=item, unit=unit or "",
@@ -482,9 +538,15 @@ class GeminiPriceResearcher:
                             precio = round(precio / (1.0 + ivp / 100.0), 2)
                             iva_txt = (f" (precio con IVA {_fmt(precio_con)}; se descontó "
                                        f"{ivp:.0f}% de IVA → {_fmt(precio)})")
-                    raw = _best_grounding_url(resp) or ""
+                    cands = _all_grounding_urls(resp)
                     model_url = str(data.get("fuente_url", "") or "")
-                    url = _pick_url(raw, model_url, resolve_links)
+                    url = _pick_url(cands, model_url, resolve_links, require_link)
+                    if require_link and not str(url).startswith("http"):
+                        # Precio sin respaldo auditable: se descarta (no se inventa fuente).
+                        print(f"[gemini-precio] '{str(item)[:40]}': precio SIN enlace de "
+                              f"respaldo verificable -> descartado.")
+                        self._cache[key] = None
+                        return None
                     nombre = _grounding_titles(resp) or str(data.get("fuente_nombre", "") or "Referencia web").strip()
                     notas = (str(data.get("notas", "") or "") + iva_txt)[:260]
                     result = PriceResearch(

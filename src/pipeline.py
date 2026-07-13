@@ -23,6 +23,16 @@ from .config import Settings
 from .ipc import apply_ipc
 from .nlp_mapper import ItemMatcher, normalize
 from .sheets_integration import WarehouseSheet
+from .units import (
+    canon_unit,
+    detect_unit_in_text,
+    es_dimensional,
+    es_plausible,
+    factor_presentacion,
+    peso_aparicion,
+    rango_plausible,
+    referencia_robusta,
+)
 
 # Nombres de columna esperados en la hoja BD APU MTTO.
 COL_CODIGO = "Codigo"
@@ -46,44 +56,14 @@ def _cop(x) -> str:
 
 _STRONG_UNITS = {"m3", "m2", "m", "kg", "gl", "lb", "in", "l", "ml_u"}
 
-def _unit_canon(s) -> str:
-    """Unidad canónica a partir de una celda de unidad. Devuelve '' para unidades
-    no reconocibles o ambiguas (no se usan para filtrar)."""
-    u = str(s or "").strip().lower()
-    u = u.replace("³", "3").replace("²", "2").replace('"', "in")
-    u = _re.sub(r"[^a-z0-9]", "", u)
-    if u in ("m3", "mt3", "mts3"): return "m3"
-    if u in ("m2", "mt2", "mts2"): return "m2"
-    if u in ("m", "ml", "mt", "mts", "metro", "metros", "mlineal"): return "m"
-    if u in ("kg", "kgs", "kilo", "kilos"): return "kg"
-    if u in ("gr", "g", "gramo", "gramos"): return "gr"
-    if u in ("ton", "tonelada", "toneladas", "tn"): return "ton"
-    if u in ("gl", "gal", "galon", "galones"): return "gl"
-    if u in ("lb", "lbs", "libra", "libras"): return "lb"
-    if u in ("in", "pulg", "pulgada", "pulgadas"): return "in"
-    if u in ("l", "lt", "lts", "litro", "litros"): return "l"
-    if u in ("und", "un", "ud", "unidad", "unidades", "u", "c", "cu"): return "und"
-    if u in ("caja", "cja", "cjs", "cajas"): return "caja"
-    if u in ("bulto", "bto", "bultos"): return "bulto"
-    if u in ("rollo", "rollos", "rll"): return "rollo"
-    if u in ("kit", "juego", "jgo", "juegos"): return "kit"
-    if u in ("par", "pares"): return "par"
-    if u in ("hr", "hora", "horas", "h", "hh"): return "hr"
-    if u in ("dia", "dias", "jornal", "jornales"): return "dia"
-    if u in ("viaje", "viajes", "vje"): return "viaje"
-    if u in ("ml_u", "cc", "mililitro", "mililitros"): return "ml_u"
-    return ""  # global, %, lona, etc. -> ambiguo
-
-def _detect_unit_in_text(text: str) -> str:
-    """Detecta una unidad de medida fuerte dentro de una descripción (p.ej.
-    'ARENA ... POR M3' -> m3)."""
-    t = " " + _re.sub(r"[^a-z0-9 ]", " ", str(text or "").lower()) + " "
-    for tok, canon in [(" m3 ", "m3"), (" m2 ", "m2"), (" kg ", "kg"),
-                       (" gl ", "gl"), (" galon ", "gl"), (" lb ", "lb"),
-                       (" ml ", "m"), (" mts ", "m"), (" m ", "m")]:
-        if tok in t:
-            return canon
-    return ""
+# BUG 2 (corregido): antes había DOS canonizadores de unidad en este archivo, uno
+# completo (_unit_canon) usado para filtrar `grp`, y uno pobre (_canon_unit, con un
+# set de 14 tokens sin sinónimos) usado dentro de _ref_estandarizada. Por eso
+# "Galón" nunca matcheaba con "Gl" y los niveles T0/T1 caían al nivel "todas" en
+# 526 de 752 ítems. Ahora hay UNA sola implementación, en units.py.
+_unit_canon = canon_unit
+_canon_unit = canon_unit
+_detect_unit_in_text = detect_unit_in_text
 
 def _categoria(grupo) -> str:
     g = str(grupo).strip().lower()
@@ -181,75 +161,175 @@ _GENERIC_DESCRIPTORS = {
 }
 
 
-def _ref_estandarizada(apariciones, wh_und, wh_desc, valor_wh_proj=None, max_ratio=3.0):
-    """Referencia = MÁXIMO sin outliers, pero PRIORIZANDO por relevancia:
-      T0: misma unidad + comparte token distintivo (marca/modelo) del WH + misma presentación
-      T1: misma unidad + misma presentación
-      T2: misma presentación (cualquier unidad)
-      T3: todas
-    Se usa el primer nivel NO vacío. Dentro del nivel: se prioriza cercanía a la BD,
-    se quitan outliers y se toma el máximo.
-    'apariciones' = lista de dicts {precio, unidad, descripcion}.
-    Devuelve (ref, n_usadas, n_out, n_lejos, unidad_no_coincide, marca_no_coincide)."""
+def _ref_estandarizada(apariciones, wh_und, wh_desc, valor_wh_proj=None, settings=None):
+    """Referencia de mercado a partir de las apariciones internas.
+
+    Reescrito para corregir los BUGS 2, 3 y el error de estimador:
+
+    1) NORMALIZA cada aparición a la unidad del WH con el factor de presentación
+       (antes solo se DETECTABA la otra presentación para excluirla):
+           "1/4 galón" $37.500  -> $150.000/gl
+           "cuñete"    $426.900 -> $85.380/gl
+           "Cemento 50 Kg" $35.500 -> $710/kg
+    2) Descarta las apariciones que violan el guardarraíl ABSOLUTO de
+       plausibilidad (config/plausibilidad.yaml).
+    3) Prioriza por relevancia:  T0 = misma unidad + marca/modelo del WH
+                                 T1 = misma unidad
+                                 T2 = todas
+       (el nivel "misma presentación" desaparece: ya está normalizada).
+    4) Estima con un CUANTIL ALTO WINSORIZADO ponderado por recencia, NO con el
+       máximo (ver units.referencia_robusta).
+
+    Como el warehouse NO es internamente consistente (guarda "Cemento 50 Kg" por
+    kilo a $1.166 pero "Sikatop 122 x 27 Kg" por paquete a $248.400, ambos con
+    unidad Kg), se evalúan las DOS hipótesis de escala del WH —por unidad y por
+    paquete— y gana la que sea coherente con el mercado. Queda registrada.
+
+    'apariciones' = lista de dicts {precio, unidad, descripcion, fecha, cantidad}.
+    Devuelve un dict con la referencia y su trazabilidad.
+    """
     import statistics
+    vacio = {
+        "ref": None, "n_usadas": 0, "n_out": 0, "n_lejos": 0, "n_implausibles": 0,
+        "unidad_no_coincide": False, "marca_no_coincide": False,
+        "n_normalizadas": 0, "ejemplos_norm": [], "escala_wh": "unidad",
+        "estimador": "", "nivel": "",
+    }
     aps = [a for a in (apariciones or []) if a.get("precio") and float(a["precio"]) > 0]
     if not aps:
-        return None, 0, 0, 0, False, False
+        return vacio
 
-    wh_u = _canon_unit(wh_und)
+    s = settings
+    normalizar = bool(getattr(s, "normalize_presentation", True))
+    usar_plaus = bool(getattr(s, "unit_plausibility", True))
+    plaus_path = getattr(s, "plausibilidad_config_path", "config/plausibilidad.yaml")
+    max_ratio = float(getattr(s, "max_price_ratio", 3.0) or 3.0)
+    halflife = float(getattr(s, "ref_recency_halflife_days", 365.0) or 0.0)
+    by_qty = bool(getattr(s, "ref_weight_by_qty", False))
+    estimador = str(getattr(s, "ref_estimator", "p75"))
+    q = float(getattr(s, "ref_quantile", 0.75))
+    winsor = float(getattr(s, "ref_winsor_pct", 5.0))
+
+    wh_u = canon_unit(wh_und)
     wh_toks = [t for t in normalize(wh_desc).split() if len(t) >= 4]
     # tokens distintivos = marca/modelo: se excluyen el sustantivo cabeza (primero) y
     # los descriptores genéricos (colores, adjetivos), que no identifican la marca.
     distintivos = {t for t in wh_toks[1:] if t not in _GENERIC_DESCRIPTORS}
-    wh_mult = _tiene_multiplicador(wh_desc)
 
+    # --- (1) Normalización de presentación a la unidad del WH ---
+    n_normalizadas = 0
+    ejemplos_norm = []
     for a in aps:
-        au = _canon_unit(a.get("unidad", ""))
+        au = canon_unit(a.get("unidad", ""))
         a_toks = set(normalize(a.get("descripcion", "")).split())
         a["_unit_ok"] = bool(wh_u) and au == wh_u
         a["_token_ok"] = bool(distintivos) and bool(distintivos & a_toks)
-        a["_pres_ok"] = (_tiene_multiplicador(a.get("descripcion", "")) == wh_mult)
+        p = float(a["precio"])
+        f, expl = (1.0, "")
+        if normalizar:
+            f, expl = factor_presentacion(a.get("descripcion", ""), a.get("unidad", ""), wh_und)
+        a["_factor"] = f
+        a["_p_raw"] = p
+        a["_p_norm"] = p / f if f and f > 0 else p
+        if expl and abs(f - 1.0) > 1e-9:
+            n_normalizadas += 1
+            # La normalización vuelve comparable esta aparición con la unidad del WH.
+            a["_unit_ok"] = True
+            if len(ejemplos_norm) < 3:
+                ejemplos_norm.append(f"{_cop(p)} ({expl}) → {_cop(round(p / f, 2))}/{wh_u or wh_und}")
 
-    def _tier(pred):
-        return [a for a in aps if pred(a)]
+    # --- (2) Hipótesis de escala del WH: ¿su precio está por unidad o por paquete? ---
+    # Se decide con la evidencia, no a ciegas. Si el WH ya guarda el precio del
+    # paquete (Sikatop $248.400/Kg), normalizar rompería el cruce; en ese caso gana
+    # la hipótesis "paquete" (precios crudos).
+    escala_wh = "unidad"
+    key = "_p_norm"
+    if normalizar and n_normalizadas and valor_wh_proj and float(valor_wh_proj) > 0:
+        import math as _m
+        bd = float(valor_wh_proj)
+        med_norm = statistics.median([a["_p_norm"] for a in aps])
+        med_raw = statistics.median([a["_p_raw"] for a in aps])
+        rg = rango_plausible(wh_desc, wh_und, plaus_path) if usar_plaus else None
+        if rg is not None:
+            # Con regla absoluta, ella decide: se elige la hipótesis plausible.
+            lo, hi, _n = rg
+            ok_norm = lo <= med_norm <= hi
+            ok_raw = lo <= med_raw <= hi
+            if ok_raw and not ok_norm:
+                escala_wh, key = "paquete", "_p_raw"
+        else:
+            # Sin regla: gana la hipótesis más coherente con la BD (distancia log).
+            d_norm = abs(_m.log(med_norm / bd)) if med_norm > 0 else float("inf")
+            d_raw = abs(_m.log(med_raw / bd)) if med_raw > 0 else float("inf")
+            if d_raw < d_norm:
+                escala_wh, key = "paquete", "_p_raw"
+    elif not normalizar:
+        key = "_p_raw"
 
-    t0 = _tier(lambda a: a["_unit_ok"] and a["_token_ok"] and a["_pres_ok"])
-    t1 = _tier(lambda a: a["_unit_ok"] and a["_pres_ok"])
-    t2 = _tier(lambda a: a["_pres_ok"])
+    # --- (3) Guardarraíl absoluto de plausibilidad ---
+    n_implausibles = 0
+    if usar_plaus:
+        buenos = [a for a in aps if es_plausible(a[key], wh_desc, wh_und, plaus_path)]
+        n_implausibles = len(aps) - len(buenos)
+        if buenos:  # si TODAS son implausibles, el ítem se queda sin referencia interna
+            aps = buenos
+        else:
+            v = dict(vacio)
+            v.update({"n_implausibles": n_implausibles, "n_normalizadas": n_normalizadas,
+                      "ejemplos_norm": ejemplos_norm, "escala_wh": escala_wh})
+            return v
+
+    # --- (4) Niveles de relevancia ---
+    t0 = [a for a in aps if a["_unit_ok"] and a["_token_ok"]]
+    t1 = [a for a in aps if a["_unit_ok"]]
     if t0:
-        usados_ap = t0
+        usados_ap, nivel = t0, "T0 (unidad + marca)"
     elif t1:
-        usados_ap = t1
-    elif t2:
-        usados_ap = t2
+        usados_ap, nivel = t1, "T1 (misma unidad)"
     else:
-        usados_ap = aps
+        usados_ap, nivel = aps, "T2 (todas)"
 
     unidad_no_coincide = not any(a["_unit_ok"] for a in usados_ap)
     marca_no_coincide = bool(distintivos) and not any(a["_token_ok"] for a in usados_ap)
 
-    ps = sorted(float(a["precio"]) for a in usados_ap)
-    usados = ps
+    # --- (5) Outliers (IQR) sobre los precios ya normalizados ---
+    ps = [float(a[key]) for a in usados_ap]
     n_out = 0
     if len(ps) >= 4:
-        q1 = statistics.quantiles(ps, n=4)[0]
-        q3 = statistics.quantiles(ps, n=4)[2]
+        srt = sorted(ps)
+        q1 = statistics.quantiles(srt, n=4)[0]
+        q3 = statistics.quantiles(srt, n=4)[2]
         iqr = q3 - q1
         lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-        filt = [p for p in ps if lo <= p <= hi]
+        filt = [a for a in usados_ap if lo <= float(a[key]) <= hi]
         if filt:
-            n_out = len(ps) - len(filt)
-            usados = filt
+            n_out = len(usados_ap) - len(filt)
+            usados_ap = filt
+
+    # --- (6) Priorizar los cercanos a la BD (no descarta si ninguno queda) ---
     n_lejos = 0
     if valor_wh_proj and max_ratio and float(valor_wh_proj) > 0:
-        lo_b = float(valor_wh_proj) / float(max_ratio)
-        hi_b = float(valor_wh_proj) * float(max_ratio)
-        cerca = [p for p in usados if lo_b <= p <= hi_b]
+        lo_b = float(valor_wh_proj) / max_ratio
+        hi_b = float(valor_wh_proj) * max_ratio
+        cerca = [a for a in usados_ap if lo_b <= float(a[key]) <= hi_b]
         if cerca:
-            n_lejos = len(usados) - len(cerca)
-            usados = cerca
-    ref = round(max(usados), 2)
-    return ref, len(usados), n_out, n_lejos, unidad_no_coincide, marca_no_coincide
+            n_lejos = len(usados_ap) - len(cerca)
+            usados_ap = cerca
+
+    # --- (7) Estimador robusto (reemplaza al MÁXIMO) ---
+    precios = [float(a[key]) for a in usados_ap]
+    pesos = [
+        peso_aparicion(a.get("fecha"), a.get("cantidad"), halflife, by_qty)
+        for a in usados_ap
+    ]
+    ref, n_usadas = referencia_robusta(precios, pesos, estimador, q, winsor)
+    return {
+        "ref": ref, "n_usadas": n_usadas, "n_out": n_out, "n_lejos": n_lejos,
+        "n_implausibles": n_implausibles, "unidad_no_coincide": unidad_no_coincide,
+        "marca_no_coincide": marca_no_coincide, "n_normalizadas": n_normalizadas,
+        "ejemplos_norm": ejemplos_norm, "escala_wh": escala_wh,
+        "estimador": estimador, "nivel": nivel,
+    }
 
 
 def _ref_maximo_sin_outliers(precios, valor_wh_proj=None, max_ratio=3.0):
@@ -285,30 +365,73 @@ def _ref_maximo_sin_outliers(precios, valor_wh_proj=None, max_ratio=3.0):
     return ref, len(usados), n_outliers, n_lejos
 
 
+def _precio_web_normalizado(pr, desc, und, settings):
+    """Valida y NORMALIZA a la unidad del WH el precio que devolvió Gemini.
+
+    Es el mismo tratamiento que reciben las fuentes internas (BUG 3): Gemini es
+    ciego a la unidad y devuelve el precio del EMPAQUE. En el reporte anterior
+    buscó "Cemento 50 Kg" y respondió $26.807 (el bulto) para una BD que está en
+    $1.166/Kg -> el arbitraje avaló un error de 30x. Aquí se convierte el precio
+    del producto hallado a la unidad del warehouse antes de compararlo con nada.
+
+    Devuelve {"precio", "norm_txt"} o None si el precio no es utilizable:
+      - confianza por debajo del mínimo,
+      - sin enlace http de respaldo (GEMINI_REQUIRE_LINK),
+      - fuera del rango plausible de la unidad (config/plausibilidad.yaml).
+    """
+    if pr is None or not pr.precio or float(pr.precio) <= 0:
+        return None
+    if pr.confianza < settings.gemini_price_min_confidence:
+        return None
+    # PENDIENTE 4: todo precio de internet DEBE venir con enlace de respaldo.
+    if settings.gemini_require_link and not str(pr.fuente_url or "").startswith("http"):
+        return None
+
+    precio = float(pr.precio)
+    norm_txt = ""
+    if settings.normalize_presentation:
+        # El texto del producto hallado es la mejor pista de la presentación
+        # ("Pintura Viniltex Blanco 1/4 Galón"); si no vino, se usa la descripción.
+        texto = f"{pr.producto or ''} {pr.calculo or ''} {desc}"
+        f, expl = factor_presentacion(texto, pr.unidad or "", und)
+        if f and f > 0 and abs(f - 1.0) > 1e-9:
+            nuevo = round(precio / f, 2)
+            norm_txt = f"{_cop(precio)} ({expl}) → {_cop(nuevo)}/{und}"
+            precio = nuevo
+
+    if settings.unit_plausibility and not es_plausible(
+        precio, desc, und, settings.plausibilidad_config_path
+    ):
+        return None
+    return {"precio": round(precio, 2), "norm_txt": norm_txt}
+
+
 def _investigar_web(gemini_price, desc, und, valor_wh_proj, settings, contexto=""):
     """Ejecuta la búsqueda de precio en internet con Gemini y devuelve un dict con
-    los campos de referencia web, o None si no hay precio creíble. Reutilizable en
-    el fallback (sin datos internos) y tras el descarte por magnitud."""
+    los campos de referencia web, o None si no hay precio creíble/soportado.
+    Reutilizable en el fallback (sin datos internos) y tras el descarte por magnitud."""
     pr = gemini_price.research_price(
         desc, und, referencia_bd=valor_wh_proj,
         resolve_links=settings.gemini_resolve_links,
+        require_link=settings.gemini_require_link,
     )
-    if (pr is None or not pr.precio or pr.precio <= 0
-            or pr.confianza < settings.gemini_price_min_confidence):
+    web = _precio_web_normalizado(pr, desc, und, settings)
+    if web is None:
         return None
-    precio = round(float(pr.precio), 2)
-    unidad_txt = f" / {pr.unidad}" if pr.unidad else ""
+    precio = web["precio"]
     prod_txt = f" Producto hallado: \"{pr.producto}\"." if pr.producto else ""
     calc_txt = f" Escalado por unidad: {pr.calculo}." if (pr.escalado and pr.calculo) else ""
+    norm_txt = f" Normalizado a '{und}': {web['norm_txt']}." if web["norm_txt"] else ""
     de_donde = (
         f"{contexto}Precio de referencia hallado en internet por Gemini: "
-        f"{_cop(precio)}{unidad_txt} (confianza {pr.confianza:.0f}).{prod_txt}{calc_txt} "
-        f"Fuente: {pr.fuente_nombre or 's/d'} ({pr.fuente_url or 's/d'})."
+        f"{_cop(precio)} / {und} (confianza {pr.confianza:.0f})."
+        f"{prod_txt}{calc_txt}{norm_txt} "
+        f"Fuente: {pr.fuente_nombre or 's/d'} ({pr.fuente_url})."
         + (f" Nota: {pr.notas}" if pr.notas else "")
     )
     return {
         "precio_ref": precio,
-        "tipo_ref": f"Investigación web (Gemini){(' · unidad ' + pr.unidad) if pr.unidad else ''}",
+        "tipo_ref": f"Investigación web (Gemini) · unidad {und}",
         "fuente_ref": pr.fuente_nombre or "Referencia web",
         "link_ref": pr.fuente_url or "",
         "region_ref": "Internet",
@@ -412,8 +535,11 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         result.errors.append(f"Consolidado no cargado: {exc}")
 
     # Unifica ambas fuentes en un solo catálogo tidy (mismo esquema).
+    # 'fecha' se propaga para poder ponderar las apariciones por recencia (una
+    # factura de hace 3 años no vale lo mismo que una de este mes).
     base_cols = ["region", "proveedor", "descripcion", "unidad", "precio",
-                 "archivo", "formato", "fuente_tipo", "gcs_path", "columna_precio", "cantidad"]
+                 "archivo", "formato", "fuente_tipo", "gcs_path", "columna_precio",
+                 "cantidad", "fecha"]
     parts = []
     for d in (comparativos, consolidado):
         if d is not None and not d.empty:
@@ -535,7 +661,23 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         valor_wh_proj = round(valor_wh * factor_proj, 2)
         valor_wh_ipc = valor_wh_proj  # alias para guardia de magnitud y diferencias
 
+        # --- Procesabilidad (CAMBIO 3) ---
+        # Un ítem solo se cruza contra el mercado si tiene un PRECIO UNITARIO que un
+        # mercado pueda refutar. Se excluyen, además del grupo no cruzable:
+        #   a) unidades NO dimensionales ('%', 'Glb'): un porcentaje no tiene precio.
+        #   b) precio de BD <= 0: sin ancla, `dentro_banda` se daba por bueno y el
+        #      ítem aceptaba CUALQUIER referencia. Así entró "Transporte Materiales"
+        #      (unidad '%', BD $0) a $130.000 -> +$9,6 M ponderados.
+        motivo_no_proc = ""
         es_procesable = str(row.get(C_GRUPO, "")).strip().lower() in MATCHABLE_GROUPS
+        if not es_procesable:
+            motivo_no_proc = "grupo"
+        elif settings.skip_non_dimensional_units and not es_dimensional(und):
+            es_procesable = False
+            motivo_no_proc = f"unidad no dimensional ('{und or 's/d'}')"
+        elif valor_wh <= 0:
+            es_procesable = False
+            motivo_no_proc = "sin precio en la BD (no hay ancla de cordura)"
 
         m = matcher.match(desc, und)
         metodo = m.method
@@ -543,10 +685,10 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         candidato = m.candidate_raw
         cand_norm = m.candidate_norm if (m.matched and es_procesable) else None
         if not es_procesable:
-            # Grupo no procesable (p.ej. Contrato/Administración): aparece en el
-            # reporte pero conserva su valor del warehouse (no se cruza ni se busca).
+            # No procesable: aparece en el reporte pero conserva su valor del
+            # warehouse (no se cruza, no se busca en internet, no se escribe).
             candidato = ""
-            metodo = "no procesable (grupo)"
+            metodo = f"no procesable ({motivo_no_proc})"
             score = 0.0
 
         # Segunda pasada con Gemini SOLO si el fuzzy quedó en zona dudosa.
@@ -596,17 +738,29 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
         if matched and not comp.empty:
             grp = comp[comp["item_norm"].isin(match_norms)].copy()
 
-            # (1) Filtro por unidad: si el insumo tiene una unidad reconocible, se
-            # restringe a registros con esa MISMA unidad (los que tengan una unidad
-            # distinta y conocida se descartan; los sin unidad se conservan). Evita
-            # mezclar precios de unidades distintas (p.ej. 200 vs 40.000).
+            # (1) Filtro por unidad. IMPORTANTE: ya NO descarta una aparición solo
+            # porque su unidad declarada difiera. Si su presentación es CONVERTIBLE a
+            # la unidad del WH (1/4 galón vendido como 'UND', cuñete, bulto de 50 Kg),
+            # se CONSERVA para que `_ref_estandarizada` la normalice. Antes este
+            # filtro botaba justo los datos que había que convertir: en el smoke del
+            # Viniltex se descartaban las 6 apariciones de 1/4 galón y las 2 de cuñete
+            # (unidad 'UND'), dejando solo los galones. Solo se descartan las de otra
+            # unidad conocida y NO convertible (mezclar $/m2 con $/m3 sí es un error).
             wh_u = _unit_canon(und)
             if wh_u and not grp.empty:
                 def _ru(r):
                     return _unit_canon(r.get("unidad")) or _detect_unit_in_text(r.get("descripcion"))
+
+                def _convertible(r):
+                    if not settings.normalize_presentation:
+                        return False
+                    f, _ = factor_presentacion(r.get("descripcion"), r.get("unidad"), und)
+                    return bool(f) and abs(float(f) - 1.0) > 1e-9
+
                 grp["_u"] = grp.apply(_ru, axis=1)
-                # registros con unidad conocida distinta -> fuera; iguales o sin unidad -> ok
-                same = grp[(grp["_u"] == wh_u) | (grp["_u"] == "") | (grp["_u"].isna())]
+                grp["_conv"] = grp.apply(_convertible, axis=1)
+                same = grp[(grp["_u"] == wh_u) | (grp["_u"] == "") | (grp["_u"].isna())
+                           | grp["_conv"]]
                 if not same.empty:
                     grp = same
 
@@ -725,11 +879,12 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                         "precio_real_max": round(float(sub["precio"].max()), 2),
                     })
 
-        # Precio de referencia estandarizado: MÁXIMO sin outliers, priorizando por
-        # UNIDAD, MARCA/modelo y misma PRESENTACIÓN, y cercanía a la BD. Si no hay
-        # apariciones, o el cruce es de otra marca, se va a la búsqueda web (Gemini).
+        # Precio de referencia: apariciones NORMALIZADAS a la unidad del WH,
+        # filtradas por plausibilidad, priorizadas por unidad/marca y estimadas con
+        # un cuantil alto winsorizado ponderado por recencia (ya NO el máximo).
         ref_es_web = False
         web_intentado = False
+        arbitraje_rechazo = False   # veredicto VINCULANTE del arbitraje (BUG 1)
         apariciones = []
         for df in (con_all, cot_full):
             if not df.empty:
@@ -738,10 +893,15 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                         "precio": ar.get("precio"),
                         "unidad": ar.get("unidad", ""),
                         "descripcion": ar.get("descripcion", ""),
+                        "fecha": ar.get("fecha", ""),
+                        "cantidad": ar.get("cantidad", None),
                     })
-        ref_val, n_usadas, n_out, n_lejos, unidad_no_coincide, marca_no_coincide = _ref_estandarizada(
-            apariciones, und, desc, valor_wh_proj, settings.max_price_ratio
-        )
+        R = _ref_estandarizada(apariciones, und, desc, valor_wh_proj, settings)
+        ref_val = R["ref"]
+        n_usadas, n_out, n_lejos = R["n_usadas"], R["n_out"], R["n_lejos"]
+        unidad_no_coincide, marca_no_coincide = R["unidad_no_coincide"], R["marca_no_coincide"]
+        n_normalizadas, n_implausibles = R["n_normalizadas"], R["n_implausibles"]
+        escala_wh, nivel_ref = R["escala_wh"], R["nivel"]
         # Ruteo por marca a Gemini SOLO cuando importa: el WH tiene marca distintiva,
         # ninguna aparición la comparte, Y la referencia interna está LEJOS de la BD
         # (si estuviera cerca, el precio es razonable y no vale la pena arriesgar). Es
@@ -782,8 +942,22 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                 prov_ref = fr.get("proveedor", "")
             except Exception:
                 pass
-            tipo_ref = "Máximo sin outliers (prioriza unidad, marca y cercanía a la BD)"
+            est_txt = str(settings.ref_estimator).upper()
+            tipo_ref = (f"{est_txt} winsorizado, ponderado por recencia "
+                        f"(normalizado a la unidad del WH) · {nivel_ref}")
             detalle = []
+            if n_normalizadas:
+                ej = "; ".join(R["ejemplos_norm"])
+                detalle.append(
+                    f"{n_normalizadas} aparición(es) convertida(s) a la unidad del WH"
+                    + (f" (p.ej. {ej})" if ej else "")
+                )
+            if escala_wh == "paquete":
+                detalle.append("la BD parece estar en precio POR PAQUETE, no por unidad: "
+                               "se comparó contra los precios sin normalizar")
+            if n_implausibles:
+                detalle.append(f"{n_implausibles} descartada(s) por el guardarraíl de "
+                               f"plausibilidad de la unidad")
             if unidad_no_coincide:
                 detalle.append("sin apariciones de la misma unidad (se usó lo disponible)")
             if n_out:
@@ -816,9 +990,10 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             marca_txt = (" Nota: posible otra marca (sin coincidencia de marca en fuentes internas); "
                          "se conserva el interno." if marca_no_coincide else "")
             de_donde = (
-                f"Máximo de {n_usadas} aparición(es) (consolidado + comparativos), "
-                f"sin outliers y priorizando cercanas a la BD ({_cop(valor_wh_proj)}): "
-                f"{_cop(precio_ref)}.{extra}{desglose_txt}{marca_txt}"
+                f"Referencia ({est_txt} winsorizado, ponderado por recencia) sobre "
+                f"{n_usadas} aparición(es) normalizadas a '{und}' "
+                f"(consolidado + comparativos), priorizando cercanas a la BD "
+                f"({_cop(valor_wh_proj)}): {_cop(precio_ref)}.{extra}{desglose_txt}{marca_txt}"
             )
         else:
             precio_ref = None
@@ -915,59 +1090,115 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
                 pr = gemini_price.research_price(
                     desc, und, referencia_bd=valor_wh_proj,
                     resolve_links=settings.gemini_resolve_links,
+                    require_link=settings.gemini_require_link,
                 )
                 n_price_research += 1
-                if (pr is not None and pr.precio and pr.precio > 0
-                        and pr.confianza >= settings.gemini_price_min_confidence):
-                    web = float(pr.precio)
-                    d_avg = abs(float(precio_ref) - web)
-                    d_wh = abs(float(valor_wh or 0) - web)
+                web = _precio_web_normalizado(pr, desc, und, settings)
+                if web is None:
+                    de_donde += (" Verificación web (Gemini): sin precio creíble, sin "
+                                 "enlace de respaldo o fuera del rango plausible de la "
+                                 "unidad; se mantiene el warehouse.")
+                    # Sin árbitro no se levanta la marca: el ítem queda para revisión.
+                    arbitraje_rechazo = True
+                else:
                     prod_txt = f" Producto: \"{pr.producto}\"." if pr.producto else ""
                     if pr.escalado and pr.calculo:
                         prod_txt += f" Escalado por unidad: {pr.calculo}."
+                    if web["norm_txt"]:
+                        prod_txt += f" Normalizado a '{und}': {web['norm_txt']}."
                     link_web = pr.fuente_url or ""
-                    unidad_txt = f" / {pr.unidad}" if pr.unidad else ""
-                    if d_avg <= d_wh:
-                        # El máximo está más cerca del mercado: Gemini lo respalda.
-                        sospechoso_pct = False
-                        tipo_ref = (tipo_ref or "Máximo") + " · verificado por Gemini (respalda el máximo)"
+                    unidad_txt = f" / {und}"
+                    web_p = web["precio"]
+                    d_ref = abs(float(precio_ref) - web_p)
+                    d_wh = abs(float(valor_wh_proj or 0) - web_p)
+                    if d_ref <= d_wh:
+                        # El mercado respalda la referencia interna. MEJORA 5: se adopta
+                        # el MENOR de los dos, para no inflar cuando el mercado está por
+                        # debajo del interno (caso 'Tubo sanitaria 6"': se aplicaba
+                        # $336.134 de UNA factura con el mercado en $254.900).
+                        adoptado = precio_ref
+                        nota_min = ""
+                        if settings.arbitrate_take_min and web_p < float(precio_ref):
+                            adoptado = round(web_p, 2)
+                            nota_min = (f" Se adopta el MENOR de los dos "
+                                        f"({_cop(adoptado)}) para no sobrecostear.")
+                        precio_ref = adoptado
+                        sospechoso_pct = False   # la marca se levanta...
+                        # ...pero la BANDA sigue siendo infranqueable (ver `aplicar`):
+                        # antes esto era la puerta por la que entraban los 30x.
+                        tipo_ref = (tipo_ref or "Referencia interna") + " · verificado por Gemini"
                         if link_web:
                             link_ref = link_web
                             fuente_ref = pr.fuente_nombre or fuente_ref
                         de_donde += (
-                            f" Verificación web (Gemini): mercado {_cop(round(web, 2))}{unidad_txt} "
-                            f"(confianza {pr.confianza:.0f}) más cercano al MÁXIMO que a la BD; "
-                            f"se adopta el máximo.{prod_txt} "
+                            f" Verificación web (Gemini): mercado {_cop(round(web_p, 2))}"
+                            f"{unidad_txt} (confianza {pr.confianza:.0f}) más cercano a la "
+                            f"referencia interna que a la BD; se respalda la referencia."
+                            f"{nota_min}{prod_txt} "
                             f"Fuente: {pr.fuente_nombre or 's/d'} ({link_web or 's/d'})."
                         )
                     else:
-                        # La BD está más cerca del mercado: se mantiene el warehouse.
+                        # BUG 1 (corregido): la BD está más cerca del mercado. El
+                        # veredicto es VINCULANTE. Antes se dejaba `sospechoso_pct=True`
+                        # pero NO se anulaba `precio_ref`, y como AUTO_APPLY_WITHIN_BAND
+                        # solo miraba la banda, el ítem se aplicaba igual: 17 ítems
+                        # (Viniltex $210.000 entre ellos) pisaron el veredicto.
+                        arbitraje_rechazo = True
                         if link_web and not link_ref:
                             link_ref = link_web
                         de_donde += (
-                            f" Verificación web (Gemini): mercado {_cop(round(web, 2))}{unidad_txt} "
-                            f"(confianza {pr.confianza:.0f}) más cercano a la BD que al máximo; "
-                            f"se mantiene el warehouse.{prod_txt} "
+                            f" Verificación web (Gemini): mercado {_cop(round(web_p, 2))}"
+                            f"{unidad_txt} (confianza {pr.confianza:.0f}) más cercano a la "
+                            f"BD que a la referencia interna; SE MANTIENE EL WAREHOUSE "
+                            f"(veredicto vinculante).{prod_txt} "
                             f"Fuente: {pr.fuente_nombre or 's/d'} ({link_web or 's/d'})."
                         )
-                else:
-                    de_donde += (" Verificación web (Gemini): sin precio creíble; "
-                                 "se mantiene el warehouse.")
 
-        # Decisión de aplicar: además de los no-sospechosos, se aplican los que
-        # estén DENTRO de la banda de cordura [BD/ratio, BD·ratio] aunque superen el
-        # umbral del 50% (esa banda ya es el límite de sensatez). Lo que se sale de
-        # la banda solo se aplica si el arbitraje de Gemini levantó la marca.
+        # --- Decisión de aplicar (CAMBIO 2: la banda es INFRANQUEABLE) ---
+        # Reglas, en orden:
+        #   1. Sin referencia -> no se aplica.
+        #   2. Veredicto vinculante del arbitraje ("se mantiene el warehouse") -> NO se
+        #      aplica, esté o no dentro de la banda. (BUG 1: antes se ignoraba.)
+        #   3. FUERA de la banda [BD/ratio, BD·ratio] -> NO se aplica NUNCA, ni siquiera
+        #      con el respaldo de Gemini. Los 10 ítems aplicados fuera de banda del
+        #      reporte anterior (Cemento 30x, Tornillo 29x, Pegacor 17x) entraron todos
+        #      porque el arbitraje ponía sospechoso_pct=False y saltaba este control.
+        #   4. Dentro de la banda: se aplica si no es sospechoso, o si
+        #      AUTO_APPLY_WITHIN_BAND lo permite.
+        #   5. Guardarraíl absoluto: la referencia debe ser plausible para su unidad.
         dentro_banda = False
-        if precio_ref is not None:
-            if not valor_wh_proj or valor_wh_proj <= 0:
-                dentro_banda = True  # sin BD contra qué comparar: se adopta la referencia
-            else:
-                r_ok = precio_ref / valor_wh_proj
-                dentro_banda = (1.0 / settings.max_price_ratio) <= r_ok <= settings.max_price_ratio
-        aplicar = precio_ref is not None and (
-            not sospechoso_pct or (settings.auto_apply_within_band and dentro_banda)
+        if precio_ref is not None and valor_wh_proj and valor_wh_proj > 0:
+            r_ok = precio_ref / valor_wh_proj
+            dentro_banda = (1.0 / settings.max_price_ratio) <= r_ok <= settings.max_price_ratio
+        ref_plausible = True
+        if precio_ref is not None and settings.unit_plausibility:
+            ref_plausible = es_plausible(precio_ref, desc, und, settings.plausibilidad_config_path)
+
+        aplicar = (
+            precio_ref is not None
+            and not arbitraje_rechazo
+            and ref_plausible
+            and (dentro_banda or not settings.enforce_band)
+            and (not sospechoso_pct or settings.auto_apply_within_band)
         )
+        if precio_ref is not None and not aplicar:
+            if arbitraje_rechazo:
+                pass  # el motivo ya quedó escrito en de_donde por el arbitraje
+            elif not ref_plausible:
+                rg = rango_plausible(desc, und, settings.plausibilidad_config_path)
+                de_donde += (
+                    f" NO SE APLICA: {_cop(precio_ref)}/{und} está fuera del rango "
+                    f"plausible para esta unidad"
+                    + (f" [{_cop(rg[0])} , {_cop(rg[1])}] ({rg[2]})" if rg else "")
+                    + " (probable precio de paquete/otra escala). Queda para revisión."
+                )
+            elif settings.enforce_band and not dentro_banda:
+                de_donde += (
+                    f" NO SE APLICA: {_cop(precio_ref)} está FUERA de la banda de cordura "
+                    f"[{_cop(valor_wh_proj / settings.max_price_ratio)} , "
+                    f"{_cop(valor_wh_proj * settings.max_price_ratio)}] "
+                    f"(ratio {precio_ref / valor_wh_proj:.1f}x vs la BD). Queda para revisión manual."
+                )
         if aplicar:
             # Valor a escribir: precio de referencia proyectado al año objetivo
             # (IPC para material/viáticos, salario mínimo para mano de obra).
@@ -1032,6 +1263,15 @@ def run_pipeline(settings: Settings, storage_client=None, progress=None) -> Pipe
             "sospechoso_dif_mayor_50pct": sospechoso_pct,
             "warehouse_por_debajo_del_mercado": por_encima_ipc,
             "descartado_por_magnitud": descartado_magnitud,
+            # Trazabilidad de los nuevos controles
+            "estimador_usado": (settings.ref_estimator if (precio_ref is not None and not ref_es_web) else ("web" if ref_es_web else "")),
+            "apariciones_normalizadas": n_normalizadas,
+            "apariciones_implausibles": n_implausibles,
+            "escala_bd_detectada": escala_wh,
+            "dentro_de_banda": dentro_banda,
+            "arbitraje_rechazo": arbitraje_rechazo,
+            "referencia_plausible": ref_plausible,
+            "motivo_no_procesable": motivo_no_proc,
             "consumo_usado": qty,
             "ahorro_ponderado": ahorro_ponderado,
             "anio_actualizado": anio_objetivo,

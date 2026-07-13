@@ -60,6 +60,60 @@ class Settings:
     source_disagree_ratio: float = field(
         default_factory=lambda: float(os.getenv("SOURCE_DISAGREE_RATIO", "1.8"))
     )
+    # --- Estimador de la referencia (CAMBIO 1) ---
+    # Antes se usaba el MÁXIMO de las apariciones. El máximo es un estadístico de
+    # orden que NO converge: con las 2.033 facturas de 'Ayudante' el máximo es el
+    # p100 y CRECE con el tamaño de la muestra (a más evidencia, más caro). Eso
+    # explicó +$280 M ponderados de sobrecosto en el reporte 20260710.
+    # Valores: p75 (recomendado) | p90 | mediana | promedio | max (legacy).
+    ref_estimator: str = field(default_factory=lambda: os.getenv("REF_ESTIMATOR", "p75"))
+    ref_quantile: float = field(default_factory=lambda: _get_float("REF_QUANTILE", 0.75))
+    # Winsorización de colas antes del cuantil (topa, no elimina). 0 = apagado.
+    ref_winsor_pct: float = field(default_factory=lambda: _get_float("REF_WINSOR_PCT", 5.0))
+    # Vida media (días) del peso por recencia de cada aparición. 0 = sin decaimiento.
+    ref_recency_halflife_days: float = field(
+        default_factory=lambda: _get_float("REF_RECENCY_HALFLIFE_DAYS", 365.0)
+    )
+    # Ponderar además por la CANTIDAD facturada. Apagado por defecto: sesga la
+    # referencia hacia precios de compra al por mayor (con descuento por volumen),
+    # que no son el precio de lista que se publica en el APU.
+    ref_weight_by_qty: bool = field(
+        default_factory=lambda: os.getenv("REF_WEIGHT_BY_QTY", "false").lower() == "true"
+    )
+
+    # --- Cordura de aplicación (CAMBIO 2) ---
+    # La banda [BD/max_price_ratio, BD*max_price_ratio] es INFRANQUEABLE: nada se
+    # escribe fuera de ella, ni siquiera cuando Gemini "respalda el máximo". En el
+    # reporte 20260710 los 10 únicos ítems aplicados fuera de banda (hasta 30x)
+    # entraron TODOS por esa puerta, porque el arbitraje ponía sospechoso=False.
+    enforce_band: bool = field(
+        default_factory=lambda: os.getenv("ENFORCE_BAND", "true").lower() == "true"
+    )
+    # El arbitraje adopta el MENOR entre el máximo interno y el precio de mercado
+    # (no infla cuando el mercado está por debajo del interno).
+    arbitrate_take_min: bool = field(
+        default_factory=lambda: os.getenv("ARBITRATE_TAKE_MIN", "true").lower() == "true"
+    )
+
+    # --- Unidades y presentación (CAMBIOS 3-5) ---
+    # No cruzar ítems con unidad no dimensional (%, Glb) ni con precio de BD <= 0:
+    # no existe un "precio unitario" que un mercado pueda refutar.
+    skip_non_dimensional_units: bool = field(
+        default_factory=lambda: os.getenv("SKIP_NON_DIMENSIONAL_UNITS", "true").lower() == "true"
+    )
+    # Normalizar cada aparición (y el precio web de Gemini) a la unidad del WH
+    # usando el factor de presentación (1/4 gl, cuñete = 5 gl, bulto = 50 kg...).
+    normalize_presentation: bool = field(
+        default_factory=lambda: os.getenv("NORMALIZE_PRESENTATION", "true").lower() == "true"
+    )
+    # Guardarraíl absoluto por familia de ítem (config/plausibilidad.yaml).
+    unit_plausibility: bool = field(
+        default_factory=lambda: os.getenv("UNIT_PLAUSIBILITY", "true").lower() == "true"
+    )
+    plausibilidad_config_path: str = field(
+        default_factory=lambda: os.getenv("PLAUSIBILIDAD_CONFIG_PATH", "config/plausibilidad.yaml")
+    )
+
     # Escritura en el Sheet: columna O = precio actualizado, columna P = año.
     # (No se escribe 'Precio de Lista' porque es una fórmula.)
     write_price_col: str = field(default_factory=lambda: os.getenv("WRITE_PRICE_COL", "O"))
@@ -192,8 +246,16 @@ class Settings:
     )
     # Intervalo mínimo (segundos) entre llamadas a Gemini, para no exceder el rate-limit
     # de Vertex (grounding) y evitar 429 RESOURCE_EXHAUSTED. 0 = sin throttle.
+    # Default 0.5 s: probado en Cloud Shell (OK=10, FALLOS=0). gemini-2.5-flash usa
+    # Dynamic Shared Quota, así que el 429 se evita espaciando, no subiendo cuota.
     gemini_min_interval_sec: float = field(
-        default_factory=lambda: float(os.getenv("GEMINI_MIN_INTERVAL_SEC", "0"))
+        default_factory=lambda: _get_float("GEMINI_MIN_INTERVAL_SEC", 0.5)
+    )
+    # Todo precio hallado en internet DEBE venir con un enlace directo (http) que lo
+    # respalde. Si el enlace no se puede resolver, el precio se RECHAZA (no se usa
+    # como referencia). Requisito de auditoría del negocio.
+    gemini_require_link: bool = field(
+        default_factory=lambda: os.getenv("GEMINI_REQUIRE_LINK", "true").lower() == "true"
     )
     # % de IVA a descontar cuando la fuente web reporta el precio CON IVA incluido.
     iva_pct: float = field(default_factory=lambda: float(os.getenv("IVA_PCT", "19")))

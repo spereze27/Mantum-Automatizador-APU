@@ -46,6 +46,10 @@ def build_mapping_report(matches: pd.DataFrame) -> pd.DataFrame:
         "diferencia_vs_ipc", "pct_diferencia", "sospechoso_dif_mayor_50pct",
         "warehouse_por_debajo_del_mercado",
         "descartado_por_magnitud",
+        # Trazabilidad de los controles nuevos (estimador, normalización, banda)
+        "estimador_usado", "apariciones_normalizadas", "apariciones_implausibles",
+        "escala_bd_detectada", "dentro_de_banda", "arbitraje_rechazo",
+        "referencia_plausible", "motivo_no_procesable",
         "consumo_usado", "ahorro_ponderado", "anio_actualizado",
         "nuevo_valor", "actualizado",
     ]
