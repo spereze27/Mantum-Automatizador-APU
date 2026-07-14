@@ -16,7 +16,7 @@ El grounding de Google Search es idéntico en ambos modos.
 
 Ambas clases son FAIL-SOFT (si no hay backend, enabled=False y devuelven None) y
 tienen un circuit breaker: tras 3 fallos seguidos (p.ej. sin cuota) se apagan por
-el resto de la corrida para no inflar el tiempo del pipeline
+el resto de la corrida para no inflar el tiempo del pipeline.
 """
 from __future__ import annotations
 
